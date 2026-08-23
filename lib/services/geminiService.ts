@@ -54,3 +54,44 @@ export async function generateCourseKnowledgeMap(syllabusBuffer: Buffer, mimeTyp
     throw new Error("Failed to parse Gemini response as JSON. Raw output: " + text);
   }
 } 
+export async function extractExamQuestions(examBuffer: Buffer, mimeType: string) {
+  if (!apiKey) throw new Error("Gemini API Key is missing.");
+
+  const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+
+  const prompt = `
+    You are an expert academic AI. Analyze the attached past exam paper.
+    Extract every individual question. If solutions or rubrics are included, pair them with the correct question.
+    Assign a 'topic' to each question based on standard academic concepts, and estimate the 'difficulty' (Easy, Medium, Hard).
+    
+    IMPORTANT: Respond ONLY with valid JSON. Do not include markdown formatting like \`\`\`json.
+    
+    Expected JSON schema:
+    [
+      {
+        "question_text": "String",
+        "solution_text": "String or null if not found",
+        "topic": "String",
+        "difficulty": "Easy | Medium | Hard"
+      }
+    ]
+  `;
+
+  const pdfPart: Part = {
+    inlineData: {
+      data: examBuffer.toString("base64"),
+      mimeType
+    },
+  };
+
+  const result = await model.generateContent([prompt, pdfPart]);
+  const response = await result.response;
+  const text = response.text();
+
+  try {
+    const cleanJson = text.replace(/```json/g, '').replace(/```/g, '').trim();
+    return JSON.parse(cleanJson);
+  } catch (error) {
+    throw new Error("Failed to parse Exam AI response as JSON. Raw output: " + text);
+  }
+}
