@@ -24,17 +24,24 @@ export default function ContextInputPage() {
     };
 
     try {
-      // We will create this API route in the Plan Simulator phase
-      console.log("Submitting context data:", contextData);
+      const response = await fetch('/api/plan/generate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(contextData),
+      });
+
+      const data = await response.json();
+
+      if (!response.ok) {
+        throw new Error(data.error || 'Failed to generate study plan.');
+      }
       
-      // Simulating a network request delay
-      await new Promise((resolve) => setTimeout(resolve, 1500));
+      // Redirect to the dashboard to view the plan
+      router.push('/dashboard');
       
-      alert("Study parameters saved! Ready to generate your optimal plan.");
-      // router.push('/simulator'); // We will redirect here later
-      
-    } catch (error) {
+    } catch (error: any) {
       console.error("Failed to save context", error);
+      alert(error.message);
     } finally {
       setIsSubmitting(false);
     }
