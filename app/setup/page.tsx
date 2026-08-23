@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useRef } from "react";
 import { supabase } from "../../lib/supabaseClient";
 
 interface ExamFileItem {
@@ -16,6 +16,8 @@ export default function SetupPage() {
   
   const [loading, setLoading] = useState(false);
   const [errorMessage, setErrorMessage] = useState("");
+
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   const handleExamUpload = (files: FileList | null) => {
     if (!files) return;
@@ -76,7 +78,7 @@ export default function SetupPage() {
         file_type: "syllabus",
       });
 
-      // 2. Upload Textbook if provided
+      // 2. Upload Textbook
       if (textbook) {
         const tbPath = `${user.id}/textbook_${Date.now()}_${textbook.name}`;
         await supabase.storage.from("course-materials").upload(tbPath, textbook);
@@ -88,7 +90,7 @@ export default function SetupPage() {
         });
       }
 
-      // 3. Upload Exams with Per-File Metadata
+      // 3. Upload Exams with metadata
       for (const item of examFiles) {
         const examPath = `${user.id}/exam_${Date.now()}_${item.file.name}`;
         await supabase.storage.from("course-materials").upload(examPath, item.file);
@@ -145,12 +147,23 @@ export default function SetupPage() {
             />
           </div>
 
-          {/* Exams Upload & Per-File Settings */}
+          {/* Past Exams Section */}
           <div>
-            <label className="block text-sm font-semibold text-gray-700 mb-2">
-              Past Exams (Upload multiple)
-            </label>
+            <div className="flex justify-between items-center mb-1">
+              <label className="text-sm font-semibold text-gray-700">
+                Past Exams
+              </label>
+              <span className="text-xs bg-amber-100 text-amber-800 font-medium px-2 py-0.5 rounded-full">
+                💡 Recommended: 20+ exams
+              </span>
+            </div>
+            
+            <p className="text-xs text-gray-500 mb-3">
+              Providing more exam papers helps the AI detect recurring question patterns and lecturer style.
+            </p>
+
             <input
+              ref={fileInputRef}
               type="file"
               multiple
               accept=".pdf,.docx"
@@ -158,12 +171,23 @@ export default function SetupPage() {
               className="w-full text-sm text-gray-500 border border-gray-300 rounded-lg p-2"
             />
 
-            {/* List of uploaded exams with granular toggles */}
+            {/* Uploaded List Header with "+ Add More" */}
             {examFiles.length > 0 && (
-              <div className="mt-4 space-y-3">
-                <p className="text-xs font-bold text-gray-500 uppercase tracking-wider">
-                  Uploaded Exam Files ({examFiles.length})
-                </p>
+              <div className="mt-6 space-y-3">
+                <div className="flex justify-between items-center border-b pb-2">
+                  <span className="text-xs font-bold text-gray-600 uppercase tracking-wider">
+                    Uploaded Exam Files ({examFiles.length})
+                  </span>
+                  
+                  <button
+                    type="button"
+                    onClick={() => fileInputRef.current?.click()}
+                    className="text-xs bg-blue-50 text-blue-600 font-semibold px-3 py-1.5 rounded-md hover:bg-blue-100 transition border border-blue-200"
+                  >
+                    + Add More Exams
+                  </button>
+                </div>
+
                 {examFiles.map((item, index) => (
                   <div
                     key={index}
