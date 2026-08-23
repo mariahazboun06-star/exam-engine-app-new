@@ -3,6 +3,7 @@ import { supabase } from '../../../../lib/supabaseClient';
 
 export async function POST(request: Request) {
   try {
+    // THIS is the part that was missing! It gets the logged-in user.
     const { data: { user } } = await supabase.auth.getUser();
     if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
 
