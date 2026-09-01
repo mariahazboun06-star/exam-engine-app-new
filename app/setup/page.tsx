@@ -136,7 +136,7 @@ export default function SetupPage() {
         });
       }
 
-      window.location.href = "/context-input";
+     window.location.href = `/topics?courseId=${courseId}`;
     } catch (err: any) {
       setErrorMessage(err.message || "אירעה שגיאה בהעלאת החומרים.");
     } finally {
