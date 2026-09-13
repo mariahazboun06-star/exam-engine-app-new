@@ -1,67 +1,81 @@
-import { NextResponse } from 'next/server';
-import { supabase } from '../../../../lib/supabaseClient';
-import { extractExamQuestions } from '../../../../lib/services/geminiService';
+import { NextResponse } from "next/server";
+import { supabase } from "@/lib/supabaseClient";
+import { extractExamQuestions } from "@/lib/services/geminiService";
 
 export async function POST(request: Request) {
   try {
-    const { data: { user }, error: authError } = await supabase.auth.getUser();
-    if (authError || !user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
-
-    const body = await request.json();
-    const { courseId, fileId } = body;
-    if (!courseId || !fileId) return NextResponse.json({ error: 'Missing courseId or fileId' }, { status: 400 });
-
-    // 1. Find the specific exam file in the database
-    const { data: fileRecord, error: fileError } = await supabase
-      .from('course_files')
-      .select('storage_path')
-      .eq('id', fileId)
-      .single();
-
-    if (fileError || !fileRecord) {
-      return NextResponse.json({ error: 'Exam file not found.' }, { status: 404 });
+    const { courseId } = await request.json();
+    if (!courseId) {
+      return NextResponse.json({ error: "Missing courseId" }, { status: 400 });
     }
 
-    // 2. Download the file from Supabase Storage
-    const { data: fileData, error: downloadError } = await supabase.storage
-      .from('course-materials')
-      .download(fileRecord.storage_path);
+    const { data: topics } = await supabase
+      .from("course_topics")
+      .select("id, topic_name")
+      .eq("course_id", courseId);
 
-    if (downloadError || !fileData) {
-      return NextResponse.json({ error: 'Failed to download exam from storage.' }, { status: 500 });
+    const { data: examFiles } = await supabase
+      .from("course_files")
+      .select("*")
+      .eq("course_id", courseId)
+      .eq("file_type", "exam");
+
+    if (!examFiles || examFiles.length === 0) {
+      return NextResponse.json({ error: "No exam files found" }, { status: 404 });
     }
 
-    const buffer = Buffer.from(await fileData.arrayBuffer());
+    const insertedQuestions = [];
 
-    // 3. Process with Gemini
-    const extractedQuestions = await extractExamQuestions(buffer, fileData.type);
+    for (const exam of examFiles) {
+      const { data: blob, error: downloadError } = await supabase.storage
+        .from("course-materials")
+        .download(exam.file_path);
 
-    // 4. Save extracted questions to the database
-    const questionsToInsert = extractedQuestions.map((q: any) => ({
-      course_id: courseId,
-      user_id: user.id,
-      source_file_id: fileId,
-      question_text: q.question_text,
-      solution_text: q.solution_text,
-      topic: q.topic,
-      difficulty: q.difficulty
-    }));
+      if (downloadError || !blob) continue;
 
-    const { error: insertError } = await supabase
-      .from('exam_questions')
-      .insert(questionsToInsert);
+      const arrayBuffer = await blob.arrayBuffer();
+      const buffer = Buffer.from(arrayBuffer);
 
-    if (insertError) throw new Error("Database insert failed: " + insertError.message);
+      const parsedQuestions = await extractExamQuestions(buffer, "application/pdf");
 
-    // 5. Update the file's ingestion status
-    await supabase.from('course_files').update({ ingestion_status: 'completed' }).eq('id', fileId);
+      const questionsToInsert = parsedQuestions.map((q: any, index: number) => {
+        const matchedTopic = topics?.find(
+          (t) => t.topic_name.toLowerCase() === q.topic?.toLowerCase()
+        );
+
+        return {
+          course_id: courseId,
+          exam_file_id: exam.id,
+          topic_id: matchedTopic ? matchedTopic.id : topics?.[0]?.id || null,
+          question_number: index + 1,
+          points: 0,
+          question_text: q.question_text || "",
+          solution_text: q.solution_text || null,
+          is_trap: q.is_trap || false,
+          guidance_notes: q.guidance_notes || "",
+        };
+      });
+
+      if (questionsToInsert.length > 0) {
+        const { data, error: insertError } = await supabase
+          .from("exam_questions")
+          .insert(questionsToInsert)
+          .select();
+
+        if (!insertError && data) {
+          insertedQuestions.push(...data);
+        }
+      }
+    }
 
     return NextResponse.json({
-      message: `Successfully extracted ${questionsToInsert.length} questions.`,
-    }, { status: 200 });
-
-  } catch (error: any) {
-    console.error("Exam Parsing Error:", error);
-    return NextResponse.json({ error: error.message || 'Server error during exam parsing.' }, { status: 500 });
+      success: true,
+      questionsCount: insertedQuestions.length,
+    });
+  } catch (err: any) {
+    return NextResponse.json(
+      { error: err.message || "Failed to parse exams" },
+      { status: 500 }
+    );
   }
 }
