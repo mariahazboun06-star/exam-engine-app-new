@@ -1,335 +1,192 @@
 "use client";
 
-import { useState, useRef } from "react";
-import { supabase } from "../../lib/supabaseClient";
-
-interface ExamFileItem {
-  file: File;
-  isCurrentLecturer: boolean;
-  hasSolutions: boolean;
-}
+import { useState } from "react";
+import { supabase } from "@/lib/supabaseClient";
 
 export default function SetupPage() {
   const [courseName, setCourseName] = useState("");
-  const [courseCode, setCourseCode] = useState("");
-  const [selectedTerms, setSelectedTerms] = useState<string[]>(["מועד א'", "מועד ב'"]);
-
-  const [syllabus, setSyllabus] = useState<File | null>(null);
-  const [textbook, setTextbook] = useState<File | null>(null);
-  const [examFiles, setExamFiles] = useState<ExamFileItem[]>([]);
-  
+  const [courseId, setCourseId] = useState<string | null>(null);
+  const [syllabusFile, setSyllabusFile] = useState<File | null>(null);
+  const [bookletFile, setBookletFile] = useState<File | null>(null);
+  const [status, setStatus] = useState<string>("");
   const [loading, setLoading] = useState(false);
-  const [errorMessage, setErrorMessage] = useState("");
 
-  const fileInputRef = useRef<HTMLInputElement>(null);
-
-  const handleTermToggle = (term: string) => {
-    setSelectedTerms((prev) =>
-      prev.includes(term) ? prev.filter((t) => t !== term) : [...prev, term]
-    );
-  };
-
-  const handleExamUpload = (files: FileList | null) => {
-    if (!files) return;
-    const newItems: ExamFileItem[] = Array.from(files).map((file) => ({
-      file,
-      isCurrentLecturer: true,
-      hasSolutions: false,
-    }));
-    setExamFiles((prev) => [...prev, ...newItems]);
-  };
-
-  const toggleLecturer = (index: number) => {
-    setExamFiles((prev) =>
-      prev.map((item, i) =>
-        i === index ? { ...item, isCurrentLecturer: !item.isCurrentLecturer } : item
-      )
-    );
-  };
-
-  const toggleSolutions = (index: number) => {
-    setExamFiles((prev) =>
-      prev.map((item, i) =>
-        i === index ? { ...item, hasSolutions: !item.hasSolutions } : item
-      )
-    );
-  };
-
-  const removeExam = (index: number) => {
-    setExamFiles((prev) => prev.filter((_, i) => i !== index));
-  };
-
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setErrorMessage("");
-
-    if (!courseName.trim()) {
-      setErrorMessage("נא להזין שם קורס.");
-      return;
-    }
-
-    if (!syllabus) {
-      setErrorMessage("נא להעלות סילבוס.");
-      return;
-    }
-
+  // 1. יצירת קורס חדש
+  const handleCreateCourse = async () => {
+    if (!courseName) return alert("נא להזין שם קורס");
     setLoading(true);
+    setStatus("יוצר קורס חדש...");
+
+    const { data, error } = await supabase
+      .from("courses")
+      .insert({ title: courseName })
+      .select()
+      .single();
+
+    if (error) {
+      setStatus("שגיאה ביצירת הקורס: " + error.message);
+      setLoading(false);
+      return;
+    }
+
+    setCourseId(data.id);
+    setStatus(`קורס "${data.title}" נוצר בהצלחה! כעת ניתן להעלות קבצים.`);
+    setLoading(false);
+  };
+
+  // 2. העלאת ועיבוד סילבוס
+  const handleUploadSyllabus = async () => {
+    if (!syllabusFile || !courseId) return;
+    setLoading(true);
+    setStatus("מעלה סילבוס ומפרק נושאים ב-AI...");
 
     try {
-      const { data: { user } } = await supabase.auth.getUser();
-      if (!user) {
-        setErrorMessage("משתמש לא מחובר. נא להתחבר מחדש.");
-        setLoading(false);
-        return;
-      }
+      const filePath = `${courseId}/syllabus-${Date.now()}.pdf`;
+      const { error: uploadErr } = await supabase.storage
+        .from("course-materials")
+        .upload(filePath, syllabusFile);
 
-      const { data: courseData, error: courseError } = await supabase
-        .from("courses")
-        .insert({
-          user_id: user.id,
-          course_name: courseName,
-          course_code: courseCode,
-          exam_terms: selectedTerms,
-        })
-        .select()
-        .single();
+      if (uploadErr) throw uploadErr;
 
-      if (courseError) throw courseError;
-      const courseId = courseData.id;
-
-      const syllabusPath = `${user.id}/${courseId}/syllabus_${Date.now()}_${syllabus.name}`;
-      await supabase.storage.from("course-materials").upload(syllabusPath, syllabus);
       await supabase.from("course_files").insert({
-        user_id: user.id,
         course_id: courseId,
-        file_name: syllabus.name,
-        file_path: syllabusPath,
         file_type: "syllabus",
+        file_path: filePath,
       });
 
-      if (textbook) {
-        const tbPath = `${user.id}/${courseId}/textbook_${Date.now()}_${textbook.name}`;
-        await supabase.storage.from("course-materials").upload(tbPath, textbook);
-        await supabase.from("course_files").insert({
-          user_id: user.id,
-          course_id: courseId,
-          file_name: textbook.name,
-          file_path: tbPath,
-          file_type: "textbook",
-        });
-      }
+      const res = await fetch("/api/extract-topics", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ courseId }),
+      });
 
-      for (const item of examFiles) {
-        const examPath = `${user.id}/${courseId}/exam_${Date.now()}_${item.file.name}`;
-        await supabase.storage.from("course-materials").upload(examPath, item.file);
+      const result = await res.json();
+      if (!res.ok) throw new Error(result.error);
 
-        await supabase.from("course_files").insert({
-          user_id: user.id,
-          course_id: courseId,
-          file_name: item.file.name,
-          file_path: examPath,
-          file_type: "exam",
-          metadata: {
-            isCurrentLecturer: item.isCurrentLecturer,
-            hasSolutions: item.hasSolutions,
-          },
-        });
-      }
-
-     window.location.href = `/topics?courseId=${courseId}`;
+      setStatus("הסילבוס עובד בהצלחה! מפת הנושאים נבנתה.");
     } catch (err: any) {
-      setErrorMessage(err.message || "אירעה שגיאה בהעלאת החומרים.");
+      setStatus("שגיאה בעיבוד הסילבוס: " + err.message);
     } finally {
       setLoading(false);
     }
   };
 
-  const buttonText = loading ? "מעלה ושומר פרטים..." : "שמור קורס והמשך לבניית התוכנית";
+  // 3. העלאת ועיבוד חוברת קורס / סיכום (Active Recall & Formulas)
+  const handleUploadBooklet = async () => {
+    if (!bookletFile || !courseId) return;
+    setLoading(true);
+    setStatus("מעלה חוברת קורס ומחלץ נוסחאות ומושגים...");
+
+    try {
+      const filePath = `${courseId}/booklet-${Date.now()}.pdf`;
+      const { error: uploadErr } = await supabase.storage
+        .from("course-materials")
+        .upload(filePath, bookletFile);
+
+      if (uploadErr) throw uploadErr;
+
+      await supabase.from("course_files").insert({
+        course_id: courseId,
+        file_type: "booklet",
+        file_path: filePath,
+      });
+
+      const res = await fetch("/api/ingest-booklet", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ courseId }),
+      });
+
+      const result = await res.json();
+      if (!res.ok) throw new Error(result.error);
+
+      setStatus(`חוברת הקורס עובדה בהצלחה! חולצו ${result.insertedCount} נוסחאות ומושגים.`);
+    } catch (err: any) {
+      setStatus("שגיאה בעיבוד החוברת: " + err.message);
+    } finally {
+      setLoading(false);
+    }
+  };
 
   return (
-    <div className="min-h-screen bg-gray-50 py-12 px-4 sm:px-6 lg:px-8" dir="rtl">
-      <div className="max-w-2xl mx-auto bg-white p-8 rounded-xl shadow">
-        <h1 className="text-2xl font-bold text-gray-900 mb-6">הוספת קורס חדש והעלאת חומרים</h1>
+    <div className="max-w-2xl mx-auto p-6 dir-rtl" dir="rtl">
+      <h1 className="text-2xl font-bold mb-6 text-gray-900">הקמת קורס והעלאת חומרי לימוד</h1>
 
-        <form onSubmit={handleSubmit} className="space-y-6">
-          <div className="space-y-4 border-b pb-6">
-            <h2 className="text-lg font-semibold text-gray-800">1. פרטי הקורס</h2>
-            
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-              <div>
-                <label className="block text-sm font-semibold text-gray-700 mb-1">
-                  שם הקורס (חובה)
-                </label>
-                <input
-                  type="text"
-                  placeholder="לדוגמה: אינפי 2"
-                  value={courseName}
-                  onChange={(e) => setCourseName(e.target.value)}
-                  className="w-full text-sm border border-gray-300 rounded-lg p-2.5 focus:ring-2 focus:ring-blue-500 outline-none"
-                  required
-                />
-              </div>
-
-              <div>
-                <label className="block text-sm font-semibold text-gray-700 mb-1">
-                  מספר קורס (אופציונלי)
-                </label>
-                <input
-                  type="text"
-                  placeholder="לדוגמה: 104012"
-                  value={courseCode}
-                  onChange={(e) => setCourseCode(e.target.value)}
-                  className="w-full text-sm border border-gray-300 rounded-lg p-2.5 focus:ring-2 focus:ring-blue-500 outline-none"
-                />
-              </div>
-            </div>
-
-            <div>
-              <label className="block text-sm font-semibold text-gray-700 mb-2">
-                מועדי בחינה נדרשים
-              </label>
-              <div className="flex items-center space-x-4 space-x-reverse text-sm">
-                {["מועד א'", "מועד ב'", "מועד ג' / מיוחד"].map((term) => (
-                  <label key={term} className="flex items-center space-x-2 space-x-reverse cursor-pointer">
-                    <input
-                      type="checkbox"
-                      checked={selectedTerms.includes(term)}
-                      onChange={() => handleTermToggle(term)}
-                      className="rounded text-blue-600 focus:ring-blue-500 h-4 w-4"
-                    />
-                    <span>{term}</span>
-                  </label>
-                ))}
-              </div>
-            </div>
-          </div>
-
-          <div className="space-y-4">
-            <h2 className="text-lg font-semibold text-gray-800">2. חומרי הלימוד והמבחנים</h2>
-
-            <div>
-              <label className="block text-sm font-semibold text-gray-700 mb-1">
-                סילבוס הקורס (חובה)
-              </label>
-              <input
-                type="file"
-                accept=".pdf,.docx"
-                onChange={(e) => setSyllabus(e.target.files?.[0] || null)}
-                className="w-full text-sm text-gray-500 border border-gray-300 rounded-lg p-2"
-              />
-            </div>
-
-            <div>
-              <label className="block text-sm font-semibold text-gray-700 mb-1">
-                ספר הקורס / מצגות (אופציונלי)
-              </label>
-              <input
-                type="file"
-                accept=".pdf,.docx"
-                onChange={(e) => setTextbook(e.target.files?.[0] || null)}
-                className="w-full text-sm text-gray-500 border border-gray-300 rounded-lg p-2"
-              />
-            </div>
-
-            <div>
-              <div className="flex justify-between items-center mb-1">
-                <label className="text-sm font-semibold text-gray-700">
-                  מבחני עבר
-                </label>
-                <span className="text-xs bg-amber-100 text-amber-800 font-medium px-2 py-0.5 rounded-full">
-                  💡 מומלץ: 20+ מבחנים
-                </span>
-              </div>
-              
-              <p className="text-xs text-gray-500 mb-3">
-                העלאת מספר רב של מבחנים תאפשר ל-AI לזהות נושאים חוזרים ודפוסי ניסוח של המרצה.
-              </p>
-
-              <input
-                ref={fileInputRef}
-                type="file"
-                multiple
-                accept=".pdf,.docx"
-                onChange={(e) => handleExamUpload(e.target.files)}
-                className="w-full text-sm text-gray-500 border border-gray-300 rounded-lg p-2"
-              />
-
-              {examFiles.length > 0 && (
-                <div className="mt-6 space-y-3">
-                  <div className="flex justify-between items-center border-b pb-2">
-                    <span className="text-xs font-bold text-gray-600 uppercase tracking-wider">
-                      קובצי מבחנים שהועלו ({examFiles.length})
-                    </span>
-                    
-                    <button
-                      type="button"
-                      onClick={() => fileInputRef.current?.click()}
-                      className="text-xs bg-blue-50 text-blue-600 font-semibold px-3 py-1.5 rounded-md hover:bg-blue-100 transition border border-blue-200"
-                    >
-                      + הוסף מבחנים נוספים
-                    </button>
-                  </div>
-
-                  {examFiles.map((item, index) => (
-                    <div
-                      key={index}
-                      className="p-3 border rounded-lg bg-gray-50 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-sm"
-                    >
-                      <span className="font-medium text-gray-800 truncate max-w-xs">
-                        {item.file.name}
-                      </span>
-
-                      <div className="flex items-center space-x-4 space-x-reverse">
-                        <label className="flex items-center space-x-1 space-x-reverse text-xs text-gray-600 cursor-pointer">
-                          <input
-                            type="checkbox"
-                            checked={item.isCurrentLecturer}
-                            onChange={() => toggleLecturer(index)}
-                            className="rounded text-blue-600"
-                          />
-                          <span>מרצה נוכחי</span>
-                        </label>
-
-                        <label className="flex items-center space-x-1 space-x-reverse text-xs text-gray-600 cursor-pointer">
-                          <input
-                            type="checkbox"
-                            checked={item.hasSolutions}
-                            onChange={() => toggleSolutions(index)}
-                            className="rounded text-blue-600"
-                          />
-                          <span>כולל פתרונות</span>
-                        </label>
-
-                        <button
-                          type="button"
-                          onClick={() => removeExam(index)}
-                          className="text-red-500 hover:text-red-700 font-bold text-xs"
-                        >
-                          ✕
-                        </button>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </div>
-          </div>
-
-          {errorMessage && (
-            <div className="p-3 bg-red-100 border border-red-200 text-red-700 rounded-lg text-sm">
-              {errorMessage}
-            </div>
-          )}
-
+      {/* שלב א': יצירת קורס */}
+      <div className="bg-white p-6 rounded-xl border shadow-sm mb-6 space-y-4">
+        <h2 className="text-lg font-bold text-gray-800">1. הגדרת קורס</h2>
+        <div className="flex gap-3">
+          <input
+            type="text"
+            placeholder="שם הקורס (לדוגמה: אלגברה ליניארית 1)"
+            value={courseName}
+            onChange={(e) => setCourseName(e.target.value)}
+            disabled={!!courseId}
+            className="flex-1 border rounded-lg p-2.5 text-sm"
+          />
           <button
-            type="submit"
-            disabled={loading}
-            className="w-full bg-blue-600 text-white font-semibold py-3 rounded-lg hover:bg-blue-700 transition"
+            onClick={handleCreateCourse}
+            disabled={loading || !!courseId}
+            className="bg-blue-600 text-white px-5 py-2.5 rounded-lg text-sm font-semibold hover:bg-blue-700 disabled:opacity-50"
           >
-            {buttonText}
+            {courseId ? "קורס נוצר ✓" : "צור קורס"}
           </button>
-        </form>
+        </div>
       </div>
+
+      {/* שלב ב': העלאת קבצים (מופעל רק לאחר יצירת קורס) */}
+      {courseId && (
+        <div className="bg-white p-6 rounded-xl border shadow-sm space-y-6">
+          <h2 className="text-lg font-bold text-gray-800">2. העלאת חומרים לעיבוד AI</h2>
+
+          {/* העלאת סילבוס */}
+          <div className="border-b pb-4 space-y-2">
+            <label className="block text-xs font-bold text-gray-700">📋 סילבוס הקורס (PDF):</label>
+            <div className="flex gap-3">
+              <input
+                type="file"
+                accept=".pdf"
+                onChange={(e) => setSyllabusFile(e.target.files?.[0] || null)}
+                className="flex-1 text-sm border rounded-lg p-2"
+              />
+              <button
+                onClick={handleUploadSyllabus}
+                disabled={loading || !syllabusFile}
+                className="bg-green-600 text-white px-4 py-2 rounded-lg text-xs font-semibold hover:bg-green-700 disabled:opacity-50"
+              >
+                עבד סילבוס
+              </button>
+            </div>
+          </div>
+
+          {/* העלאת חוברת / סיכום */}
+          <div className="space-y-2">
+            <label className="block text-xs font-bold text-gray-700">📚 חוברת קורס / סיכום / דף נוסחאות (PDF):</label>
+            <div className="flex gap-3">
+              <input
+                type="file"
+                accept=".pdf"
+                onChange={(e) => setBookletFile(e.target.files?.[0] || null)}
+                className="flex-1 text-sm border rounded-lg p-2"
+              />
+              <button
+                onClick={handleUploadBooklet}
+                disabled={loading || !bookletFile}
+                className="bg-purple-600 text-white px-4 py-2 rounded-lg text-xs font-semibold hover:bg-purple-700 disabled:opacity-50"
+              >
+                עבד חוברת ונוסחאות
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* הודעות סטטוס */}
+      {status && (
+        <div className="mt-4 p-4 rounded-lg bg-blue-50 border border-blue-200 text-blue-900 text-sm font-medium">
+          {status}
+        </div>
+      )}
     </div>
   );
 }

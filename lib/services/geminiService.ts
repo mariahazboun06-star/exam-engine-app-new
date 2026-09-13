@@ -139,3 +139,63 @@ export async function parseCourseBooklet(bookletBuffer: Buffer, mimeType: string
     throw new Error("Failed to parse Booklet AI response as JSON. Raw output: " + text);
   }
 }
+export async function parseExamQuestions(
+  examBuffer: Buffer,
+  mimeType: string,
+  availableTopics: { id: string; title: string }[]
+) {
+  if (!apiKey) throw new Error("Gemini API Key is missing.");
+
+  const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+
+  const topicsContext = availableTopics
+    .map((t) => `ID: "${t.id}", Title: "${t.title}"`)
+    .join("\n");
+
+  const prompt = `
+    You are an expert academic AI assistant analyzing a university exam.
+    Analyze the attached exam document and break it down into individual questions.
+
+    Available Course Topics:
+    ${topicsContext}
+
+    For each question in the exam:
+    1. Extract the question text and number.
+    2. Determine if it is a "trap" / corner-case question (isTrap: boolean).
+    3. Match the question to EXACTLY ONE topic ID from the "Available Course Topics" list above. If no topic matches closely, set topicId to null.
+    4. Provide guidance notes explaining the trap/trick (if applicable).
+    5. Provide a step-by-step solution.
+
+    IMPORTANT: Respond ONLY with valid JSON. Do not include markdown formatting like \`\`\`json.
+
+    Expected JSON schema:
+    [
+      {
+        "questionNumber": 1,
+        "questionText": "String",
+        "isTrap": true,
+        "topicId": "String (UUID from provided topics) or null",
+        "guidanceNotes": "String",
+        "solutionText": "String"
+      }
+    ]
+  `;
+
+  const pdfPart: Part = {
+    inlineData: {
+      data: examBuffer.toString("base64"),
+      mimeType,
+    },
+  };
+
+  const result = await model.generateContent([prompt, pdfPart]);
+  const response = await result.response;
+  const text = response.text();
+
+  try {
+    const cleanJson = text.replace(/```json/g, "").replace(/```/g, "").trim();
+    return JSON.parse(cleanJson);
+  } catch (error) {
+    throw new Error("Failed to parse Exam AI response as JSON. Raw output: " + text);
+  }
+}

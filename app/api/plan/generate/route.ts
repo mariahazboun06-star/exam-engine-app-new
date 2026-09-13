@@ -1,66 +1,88 @@
-import { NextResponse } from 'next/server';
-import { supabase } from '../../../../lib/supabaseClient';
-import { generateStudyPlan } from '../../../../lib/services/plannerService';
+import { NextResponse } from "next/server";
+import { supabase } from "@/lib/supabaseClient";
+import { GoogleGenerativeAI } from "@google/generative-ai";
+
+const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY || "");
 
 export async function POST(request: Request) {
   try {
-    const { data: { user }, error: authError } = await supabase.auth.getUser();
-    if (authError || !user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+    const { courseId, examDate, availableHoursPerDay } = await request.json();
 
-    const body = await request.json();
-    const { courseId, examDate, studyHoursPerWeek, targetGrade } = body;
-
-    if (!courseId || !examDate || !studyHoursPerWeek || !targetGrade) {
-      return NextResponse.json({ error: 'Missing required parameters.' }, { status: 400 });
+    if (!courseId || !examDate) {
+      return NextResponse.json({ error: "Missing required parameters" }, { status: 400 });
     }
 
-    // 1. Fetch the generated Knowledge Map for this course
-    const { data: mapRecord, error: mapError } = await supabase
-      .from('course_knowledge_maps')
-      .select('map_data')
-      .eq('course_id', courseId)
-      .eq('user_id', user.id)
-      .single();
+    // 1. שליפת נושאים, שכיחות במבחנים וסטטוס מושגים
+    const [{ data: topics }, { data: stats }, { data: concepts }] = await Promise.all([
+      supabase.from("course_topics").select("id, title").eq("course_id", courseId),
+      supabase.from("course_topic_stats").select("topic_id, appearance_percentage, question_count").eq("course_id", courseId),
+      supabase.from("course_concepts").select("topic_id, status_color").eq("course_id", courseId)
+    ]);
 
-    if (mapError || !mapRecord) {
-      return NextResponse.json({ error: 'Knowledge Map not found. Please upload course materials first.' }, { status: 404 });
-    }
+    // 2. חישוב ציון עדיפות לכל נושא (משקל שכיחות במבחן + מושגים לתרגול)
+    const prioritizedTopics = (topics || []).map((topic) => {
+      const stat = stats?.find((s) => s.topic_id === topic.id);
+      const topicConcepts = concepts?.filter((c) => c.topic_id === topic.id) || [];
+      const weakConceptsCount = topicConcepts.filter((c) => c.status_color === "red" || c.status_color === "yellow").length;
 
-    // 2. Run the Feasibility Algorithm
-    const planResult = generateStudyPlan({
-      knowledgeMap: mapRecord.map_data,
-      examDate,
-      studyHoursPerWeek: Number(studyHoursPerWeek),
-      targetGrade
-    });
+      const appearanceWeight = stat?.appearance_percentage || 0;
+      // נוסחת שקול: שכיחות במבחן כפול 1.5 + כמות מושגים חלשים כפול 2
+      const priorityScore = (appearanceWeight * 1.5) + (weakConceptsCount * 2);
 
-    // 3. Save the generated plan to Supabase
-    const { data: savedPlan, error: insertError } = await supabase
-      .from('study_plans')
-      .insert({
-        course_id: courseId,
-        user_id: user.id,
-        exam_date: examDate,
-        target_grade: targetGrade,
-        study_hours_per_week: Number(studyHoursPerWeek),
-        is_feasible: planResult.isFeasible,
-        total_required_hours: planResult.totalRequiredHours,
-        total_available_hours: planResult.totalAvailableHours,
-        schedule_data: planResult.scheduleData
-      })
-      .select()
-      .single();
+      return {
+        id: topic.id,
+        title: topic.title,
+        appearancePercentage: appearanceWeight,
+        weakConceptsCount,
+        priorityScore
+      };
+    }).sort((a, b) => b.priorityScore - a.priorityScore);
 
-    if (insertError) throw new Error("Failed to save study plan: " + insertError.message);
+    // 3. יצירת תוכנית מותאמת אישית עם Gemini
+    const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+
+    const prompt = `
+      You are an academic study planner assistant.
+      Generate an optimized daily study plan leading up to the exam date: ${examDate}.
+      Student's daily study limit: ${availableHoursPerDay || 4} hours/day.
+
+      Topic Priorities (Sorted by high exam frequency and student weakness):
+      ${JSON.stringify(prioritizedTopics, null, 2)}
+
+      Instructions:
+      1. Allocate the highest study hours and earlier schedule slots to topics with high appearancePercentage and priorityScore.
+      2. Include active recall sessions for red/yellow flashcards.
+      3. Reserve the last 1-2 days before the exam strictly for full exam simulations and trap question reviews.
+      4. Return ONLY valid JSON with no markdown syntax.
+
+      Schema format:
+      {
+        "schedule": [
+          {
+            "dayNumber": 1,
+            "dateLabel": "String",
+            "focusTopics": ["Topic Name"],
+            "allocatedHours": 4,
+            "tasks": ["Task description"]
+          }
+        ]
+      }
+    `;
+
+    const result = await model.generateContent(prompt);
+    const text = result.response.text();
+    const cleanJson = text.replace(/```json/g, "").replace(/```/g, "").trim();
+    const planData = JSON.parse(cleanJson);
 
     return NextResponse.json({
-      message: 'Study plan generated successfully.',
-      data: savedPlan,
-      metrics: planResult
-    }, { status: 200 });
-
-  } catch (error: any) {
-    console.error("Plan Generation Error:", error);
-    return NextResponse.json({ error: error.message || 'Server error during plan generation.' }, { status: 500 });
+      success: true,
+      schedule: planData.schedule,
+      prioritizedTopics
+    });
+  } catch (err: any) {
+    return NextResponse.json(
+      { error: err.message || "Failed to generate weighted study plan" },
+      { status: 500 }
+    );
   }
 }
