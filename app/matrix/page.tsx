@@ -1,120 +1,122 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { getCourseMatrixAndAnalytics, MatrixAnalyticsResult } from "@/lib/services/analyticsService";
 import { supabase } from "@/lib/supabaseClient";
 
-interface TopicStat {
-  topic_id: string;
-  topic_title: string;
-  question_count: number;
-  appearance_percentage: number;
-  questions: {
-    id: string;
-    question_number: number;
-    question_text: string;
-    is_trap: boolean;
-  }[];
-}
-
 export default function MatrixPage() {
-  const [stats, setStats] = useState<TopicStat[]>([]);
+  const [data, setData] = useState<MatrixAnalyticsResult | null>(null);
   const [loading, setLoading] = useState(true);
+  const [courseId, setCourseId] = useState<string | null>(null);
 
   useEffect(() => {
-    fetchMatrixData();
+    async function init() {
+      // שליפת הקורס הפילי
+      const { data: courses } = await supabase.from("courses").select("id").limit(1);
+      if (courses && courses.length > 0) {
+        setCourseId(courses[0].id);
+        const matrixData = await getCourseMatrixAndAnalytics(courses[0].id);
+        setData(matrixData);
+      }
+      setLoading(false);
+    }
+    init();
   }, []);
 
-  async function fetchMatrixData() {
-    setLoading(true);
-
-    // שליפת הנושאים, השכיחות והשאלות המשויכות
-    const [{ data: topics }, { data: topicStats }, { data: questions }] = await Promise.all([
-      supabase.from("course_topics").select("id, title"),
-      supabase.from("course_topic_stats").select("*"),
-      supabase.from("exam_questions").select("id, topic_id, question_number, question_text, is_trap"),
-    ]);
-
-    if (topics) {
-      const formattedStats: TopicStat[] = topics.map((t) => {
-        const stat = topicStats?.find((s) => s.topic_id === t.id);
-        const relatedQuestions = questions?.filter((q) => q.topic_id === t.id) || [];
-
-        return {
-          topic_id: t.id,
-          topic_title: t.title,
-          question_count: stat?.question_count || relatedQuestions.length,
-          appearance_percentage: stat?.appearance_percentage || 0,
-          questions: relatedQuestions,
-        };
-      });
-
-      // מיוון לפי הנושאים השכיחים ביותר במבחנים
-      formattedStats.sort((a, b) => b.appearance_percentage - a.appearance_percentage);
-      setStats(formattedStats);
-    }
-
-    setLoading(false);
+  if (loading) {
+    return <div className="p-8 text-center dir-rtl" dir="rtl">טוען את הטבלה המצליבה...</div>;
   }
 
-  if (loading) {
-    return <div className="p-8 text-center dir-rtl" dir="rtl">טוען את מטריצת הנושאים והשכיחויות...</div>;
+  if (!data || data.matrixRows.length === 0) {
+    return (
+      <div className="p-8 text-center dir-rtl" dir="rtl">
+        <h2 className="text-xl font-bold">לא נמצאו נתונים</h2>
+        <p className="text-gray-500 text-sm mt-2">יש להעלות סילבוס ומבחנים במסך ה-Setup תחילה.</p>
+      </div>
+    );
   }
 
   return (
-    <div className="max-w-5xl mx-auto p-6 dir-rtl" dir="rtl">
+    <div className="max-w-7xl mx-auto p-6 dir-rtl" dir="rtl">
       <div className="mb-6">
-        <h1 className="text-2xl font-bold text-gray-900">📊 מטריצת שכיחות נושאים במבחנים</h1>
+        <h1 className="text-2xl font-bold text-gray-900">📊 מטריצה מצליבה: נושאים מול מועדי מבחנים</h1>
         <p className="text-xs text-gray-500 mt-1">
-          ניתוח ה-AI מציג את משקל כל נושא במבחנים שנורו, כדי למקד את הלמידה בנושאים הקריטיים ביותר.
+          הטבלה מציגה את השאלות המדויקות מכל מועד ומזהה אוטומטית נושאי חובה המופיעים באופן קבוע במבחנים.
         </p>
       </div>
 
-      <div className="space-y-4">
-        {stats.map((item) => (
-          <div key={item.topic_id} className="bg-white rounded-xl border p-5 shadow-sm space-y-3">
-            <div className="flex justify-between items-center border-b pb-3">
-              <div>
-                <h3 className="text-base font-bold text-gray-800">{item.topic_title}</h3>
-                <span className="text-xs text-gray-500">
-                  סה"כ שאלות שנמצאו: <strong>{item.question_count}</strong>
-                </span>
-              </div>
-              <div className="text-left">
-                <span className="inline-block bg-blue-100 text-blue-800 font-extrabold text-sm px-3 py-1 rounded-full">
-                  {item.appearance_percentage}% מהמבחנים
-                </span>
-              </div>
-            </div>
+      <div className="overflow-x-auto bg-white rounded-xl border shadow-sm">
+        <table className="w-full text-sm text-right border-collapse">
+          <thead>
+            <tr className="bg-gray-100 border-b text-gray-700">
+              <th className="p-4 border-l font-bold min-w-[220px]">נושא בסילבוס</th>
+              <th className="p-4 border-l font-bold text-center w-28">שכיחות</th>
+              {data.exams.map((exam) => (
+                <th key={exam.id} className="p-4 border-l font-bold text-center min-w-[120px]">
+                  {exam.year} {exam.term}
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {data.matrixRows.map((row) => (
+              <tr
+                key={row.topicId}
+                className={`border-b hover:bg-gray-50 transition-colors ${
+                  row.isMandatory ? "bg-red-50/40" : ""
+                }`}
+              >
+                {/* שם הנושא ותגית נושא חובה */}
+                <td className="p-4 border-l">
+                  <div className="font-bold text-gray-800">{row.topicTitle}</div>
+                  {row.isMandatory && (
+                    <span className="inline-block mt-1 bg-red-600 text-white text-[10px] font-extrabold px-2 py-0.5 rounded-full">
+                      🔥 נושא חובה במבחנים (סבירות גבוהה)
+                    </span>
+                  )}
+                </td>
 
-            {/* רשימת שאלות מסווגות נושא */}
-            <div>
-              <h4 className="text-xs font-semibold text-gray-600 mb-2">שאלות מסווגות מתוך המבחנים:</h4>
-              {item.questions.length === 0 ? (
-                <p className="text-xs text-gray-400 italic">טרם סווגו שאלות לנושא זה.</p>
-              ) : (
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
-                  {item.questions.map((q) => (
-                    <div
-                      key={q.id}
-                      className={`p-2.5 rounded-lg border text-xs flex justify-between items-center ${
-                        q.is_trap ? "bg-red-50/50 border-red-200" : "bg-gray-50 border-gray-200"
-                      }`}
-                    >
-                      <span className="font-medium truncate max-w-[80%]">
-                        שאלה {q.question_number}: {q.question_text}
-                      </span>
-                      {q.is_trap && (
-                        <span className="bg-red-600 text-white text-[10px] px-1.5 py-0.5 rounded font-bold">
-                          מלכודת 🔥
-                        </span>
+                {/* אחוז שכיחות */}
+                <td className="p-4 border-l text-center font-bold">
+                  <span
+                    className={`inline-block px-2.5 py-1 rounded-full text-xs ${
+                      row.isMandatory
+                        ? "bg-red-100 text-red-800"
+                        : row.appearancePercentage >= 50
+                        ? "bg-yellow-100 text-yellow-800"
+                        : "bg-gray-100 text-gray-600"
+                    }`}
+                  >
+                    {row.appearancePercentage}%
+                  </span>
+                </td>
+
+                {/* שאלות לפי מועדים */}
+                {data.exams.map((exam) => {
+                  const qNumbers = row.examQuestionsMap[exam.id];
+                  return (
+                    <td key={exam.id} className="p-4 border-l text-center">
+                      {qNumbers && qNumbers.length > 0 ? (
+                        <div className="flex flex-wrap gap-1 justify-center">
+                          {qNumbers.map((qNum) => (
+                            <span
+                              key={qNum}
+                              className="bg-blue-100 text-blue-900 border border-blue-200 font-semibold px-2 py-0.5 rounded text-xs"
+                            >
+                              שאלה {qNum}
+                            </span>
+                          ))}
+                        </div>
+                      ) : (
+                        <span className="text-gray-300 text-xs">—</span>
                       )}
-                    </div>
-                  ))}
-                </div>
-              )}
-            </div>
-          </div>
-        ))}
+                    </td>
+                  );
+                })}
+              </tr>
+            ))}
+          </tbody>
+        </table>
       </div>
     </div>
   );
