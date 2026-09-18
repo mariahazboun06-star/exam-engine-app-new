@@ -1,180 +1,137 @@
 "use client";
 
-import { useEffect, useState, Suspense } from "react";
-import { useSearchParams } from "next/navigation";
-import { supabase } from "../../lib/supabaseClient";
+import { useEffect, useState } from "react";
+import { supabase } from "@/lib/supabaseClient";
+import Link from "next/link";
+import { useRouter } from "next/navigation";
 
-interface TopicStat {
+interface Course {
   id: string;
-  topic_name: string;
-  appearanceCount: number;
-  probability: number;
-  priority: "גבוהה מאוד" | "בינונית" | "נמוכה";
+  name: string;
+  code: string;
+  created_at: string;
 }
 
-function DashboardContent() {
-  const searchParams = useSearchParams();
-  const courseId = searchParams.get("courseId");
-
-  const [courseName, setCourseName] = useState("");
-  const [stats, setStats] = useState<TopicStat[]>([]);
-  const [totalExams, setTotalExams] = useState(0);
+export default function UserDashboard() {
+  const router = useRouter();
+  const [courses, setCourses] = useState<Course[]>([]);
+  const [newCourseName, setNewCourseName] = useState("");
+  const [newCourseCode, setNewCourseCode] = useState("");
   const [loading, setLoading] = useState(true);
+  const [creating, setCreating] = useState(false);
 
   useEffect(() => {
-    if (!courseId) return;
-
-    const calculateAnalytics = async () => {
-      try {
-        const { data: course } = await supabase
-          .from("courses")
-          .select("course_name")
-          .eq("id", courseId)
-          .single();
-
-        if (course) setCourseName(course.course_name);
-
-        const { data: topics } = await supabase
-          .from("course_topics")
-          .select("id, topic_name")
-          .eq("course_id", courseId);
-
-        const { data: exams } = await supabase
-          .from("course_files")
-          .select("id")
-          .eq("course_id", courseId)
-          .eq("file_type", "exam");
-
-        const { data: questions } = await supabase
-          .from("exam_questions")
-          .select("topic_id, exam_file_id")
-          .eq("course_id", courseId);
-
-        const examsCount = exams?.length || 1;
-        setTotalExams(examsCount);
-
-        if (topics && questions) {
-          const calculatedStats: TopicStat[] = topics.map((t) => {
-            const uniqueExamsWithTopic = new Set(
-              questions.filter((q) => q.topic_id === t.id).map((q) => q.exam_file_id)
-            ).size;
-
-            const prob = Math.min(
-              100,
-              Math.round((uniqueExamsWithTopic / examsCount) * 100)
-            );
-
-            let priority: "גבוהה מאוד" | "בינונית" | "נמוכה" = "נמוכה";
-            if (prob >= 75) priority = "גבוהה מאוד";
-            else if (prob >= 40) priority = "בינונית";
-
-            return {
-              id: t.id,
-              topic_name: t.topic_name,
-              appearanceCount: uniqueExamsWithTopic,
-              probability: prob,
-              priority,
-            };
-          });
-
-          calculatedStats.sort((a, b) => b.probability - a.probability);
-          setStats(calculatedStats);
-        }
-      } catch (err) {
-        console.error("שגיאה בחישוב האנליטיקה:", err);
-      } finally {
-        setLoading(false);
+    async function loadUserCourses() {
+      const { data: { user } } = await supabase.auth.getUser();
+      if (!user) {
+        router.push("/");
+        return;
       }
-    };
 
-    calculateAnalytics();
-  }, [courseId]);
+      const { data } = await supabase
+        .from("courses")
+        .select("*")
+        .eq("user_id", user.id)
+        .order("created_at", { ascending: false });
 
-  if (loading) {
-    return (
-      <div className="min-h-screen flex items-center justify-center bg-gray-50" dir="rtl">
-        <p className="text-gray-600 font-medium">מחשב הסתברויות ובונה את תחזית הבחינה...</p>
-      </div>
-    );
-  }
+      if (data) setCourses(data);
+      setLoading(false);
+    }
+
+    loadUserCourses();
+  }, [router]);
+
+  const handleCreateCourse = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!newCourseName) return;
+
+    setCreating(true);
+    const { data: { user } } = await supabase.auth.getUser();
+
+    if (user) {
+      const { data, error } = await supabase
+        .from("courses")
+        .insert({
+          name: newCourseName,
+          code: newCourseCode,
+          user_id: user.id,
+        })
+        .select()
+        .single();
+
+      if (data) {
+        setCourses([data, ...courses]);
+        setNewCourseName("");
+        setNewCourseCode("");
+      }
+    }
+    setCreating(false);
+  };
+
+  if (loading) return <div className="p-8 text-center dir-rtl" dir="rtl">טוען את הקורסים שלך...</div>;
 
   return (
-    <div className="min-h-screen bg-gray-50 py-10 px-6" dir="rtl">
-      <div className="max-w-5xl mx-auto space-y-6">
-        <div className="bg-white p-6 rounded-xl shadow flex justify-between items-center">
-          <div>
-            <h1 className="text-2xl font-bold text-gray-900">
-              תחזית וניתוח סטטיסטי: {courseName || "הקורס שלך"}
-            </h1>
-            <p className="text-sm text-gray-500 mt-1">
-              מבוסס על ניתוח AI של {totalExams} מבחני עבר ומיפוי השאלות
-            </p>
-          </div>
+    <div className="max-w-5xl mx-auto p-6 dir-rtl space-y-8" dir="rtl">
+      <div className="flex justify-between items-center border-b pb-4">
+        <div>
+          <h1 className="text-2xl font-bold text-gray-900">📚 הקורסים שלי</h1>
+          <p className="text-xs text-gray-500 mt-1">בחר קורס כדי לצפות בחומרים, במטריצה ובסימולטורים.</p>
+        </div>
+      </div>
+
+      {/* יצירת קורס חדש */}
+      <div className="bg-white p-6 rounded-xl border shadow-sm">
+        <h2 className="text-sm font-bold text-gray-800 mb-3">➕ הוספת קורס חדש למערכת</h2>
+        <form onSubmit={handleCreateCourse} className="grid grid-cols-1 md:grid-cols-3 gap-3">
+          <input
+            type="text"
+            placeholder="שם הקורס (למשל: מבוא למיקרו כלכלה)"
+            value={newCourseName}
+            onChange={(e) => setNewCourseName(e.target.value)}
+            className="p-2.5 border rounded-lg text-xs"
+            required
+          />
+          <input
+            type="text"
+            placeholder="קוד קורס (אופציונלי)"
+            value={newCourseCode}
+            onChange={(e) => setNewCourseCode(e.target.value)}
+            className="p-2.5 border rounded-lg text-xs"
+          />
           <button
-            onClick={() => (window.location.href = `/matrix?courseId=${courseId}`)}
-            className="text-xs bg-gray-100 hover:bg-gray-200 text-gray-700 font-semibold px-3 py-2 rounded-lg transition"
+            type="submit"
+            disabled={creating}
+            className="bg-blue-600 hover:bg-blue-700 text-white font-bold text-xs rounded-lg p-2.5 transition"
           >
-            ← חזרה למטריצה
+            {creating ? "יוצר..." : "צור קורס"}
           </button>
-        </div>
+        </form>
+      </div>
 
-        <div className="bg-white p-6 rounded-xl shadow space-y-4">
-          <h2 className="text-lg font-bold text-gray-800 border-b pb-3">
-            הסתברות הופעת נושאים במבחן הקרוב
-          </h2>
-
-          <div className="space-y-4">
-            {stats.map((item, idx) => {
-              const barColor =
-                item.probability >= 75
-                  ? "bg-red-500"
-                  : item.probability >= 40
-                  ? "bg-amber-500"
-                  : "bg-blue-400";
-
-              const badgeColor =
-                item.priority === "גבוהה מאוד"
-                  ? "bg-red-100 text-red-800"
-                  : item.priority === "בינונית"
-                  ? "bg-amber-100 text-amber-800"
-                  : "bg-gray-200 text-gray-700";
-
-              return (
-                <div key={item.id} className="p-4 border rounded-lg bg-gray-50 space-y-2">
-                  <div className="flex justify-between items-center">
-                    <div className="flex items-center space-x-3 space-x-reverse">
-                      <span className="font-bold text-gray-400 text-sm">#{idx + 1}</span>
-                      <span className="font-semibold text-gray-800">{item.topic_name}</span>
-                    </div>
-
-                    <div className="flex items-center space-x-3 space-x-reverse">
-                      <span className={`text-xs font-bold px-2.5 py-1 rounded-full ${badgeColor}`}>
-                        עדיפות: {item.priority}
-                      </span>
-                      <span className="text-sm font-bold text-blue-600">{item.probability}%</span>
-                    </div>
-                  </div>
-
-                  <div className="w-full bg-gray-200 h-2.5 rounded-full overflow-hidden">
-                    <div
-                      className={`h-full transition-all duration-500 ${barColor}`}
-                      style={{ width: `${item.probability}%` }}
-                    ></div>
-                  </div>
-                </div>
-              );
-            })}
+      {/* רשימת הקורסים */}
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+        {courses.length === 0 ? (
+          <div className="col-span-full text-center p-8 bg-gray-50 rounded-xl border text-gray-500 text-xs">
+            עדיין לא הקמת קורסים. צור את הקורס הראשון שלך למעלה!
           </div>
-        </div>
+        ) : (
+          courses.map((c) => (
+            <Link
+              key={c.id}
+              href={`/courses/${c.id}`}
+              className="bg-white p-5 rounded-xl border hover:border-blue-500 hover:shadow-md transition space-y-3 block"
+            >
+              <div className="flex justify-between items-start">
+                <span className="text-xs font-bold text-blue-600 bg-blue-50 px-2 py-0.5 rounded">
+                  {c.code || "קורס"}
+                </span>
+                <span className="text-xs text-gray-400">כניסה לקורס ←</span>
+              </div>
+              <h3 className="font-bold text-base text-gray-900">{c.name}</h3>
+            </Link>
+          ))
+        )}
       </div>
     </div>
-  );
-}
-
-export default function DashboardPage() {
-  return (
-    <Suspense fallback={<div className="p-10 text-center">טוען נתונים...</div>}>
-      <DashboardContent />
-    </Suspense>
   );
 }
