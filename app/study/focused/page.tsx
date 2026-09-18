@@ -18,28 +18,29 @@ export default function FocusedStudyPage() {
   const [mandatoryTopics, setMandatoryTopics] = useState<TopicMatrixRow[]>([]);
   const [questions, setQuestions] = useState<FocusedQuestion[]>([]);
   const [showSolution, setShowSolution] = useState<Record<string, boolean>>({});
+  const [dynamicSolutions, setDynamicSolutions] = useState<Record<string, string>>({});
+  const [loadingSolutions, setLoadingSolutions] = useState<Record<string, boolean>>({});
+  const [courseId, setCourseId] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     async function loadFocusedContent() {
-      // 1. שליפת הקורס והנושאים
       const { data: courses } = await supabase.from("courses").select("id").limit(1);
       if (!courses || courses.length === 0) {
         setLoading(false);
         return;
       }
 
-      const courseId = courses[0].id;
-      const matrixData = await getCourseMatrixAndAnalytics(courseId);
+      const currentCourseId = courses[0].id;
+      setCourseId(currentCourseId);
       
-      // 2. סינון נושאי חובה בלבד (>= 80%)
+      const matrixData = await getCourseMatrixAndAnalytics(currentCourseId);
       const mandatory = matrixData.matrixRows.filter((r) => r.isMandatory);
       setMandatoryTopics(mandatory);
 
       const mandatoryTopicIds = mandatory.map((m) => m.topicId);
 
       if (mandatoryTopicIds.length > 0) {
-        // 3. שליפת השאלות השייכות לנושאי החובה בלבד
         const { data: qData } = await supabase
           .from("exam_questions")
           .select("*")
@@ -67,8 +68,37 @@ export default function FocusedStudyPage() {
     loadFocusedContent();
   }, []);
 
-  const toggleSolution = (id: string) => {
-    setShowSolution((prev) => ({ ...prev, [id]: !prev[id] }));
+  const toggleSolution = async (questionId: string) => {
+    const isCurrentlyShown = showSolution[questionId];
+    setShowSolution((prev) => ({ ...prev, [questionId]: !isCurrentlyShown }));
+
+    // יצירת פתרון המבוסס על ספר הקורס במידה וטרם נשלף
+    if (!isCurrentlyShown && !dynamicSolutions[questionId] && courseId) {
+      setLoadingSolutions((prev) => ({ ...prev, [questionId]: true }));
+      try {
+        const res = await fetch("/api/study/solve", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ questionId, courseId }),
+        });
+        const data = await res.json();
+        if (data.success) {
+          setDynamicSolutions((prev) => ({ ...prev, [questionId]: data.answer }));
+        } else {
+          setDynamicSolutions((prev) => ({
+            ...prev,
+            [questionId]: data.error || "לא ניתן היה לגזור פתרון מספר הקורס.",
+          }));
+        }
+      } catch {
+        setDynamicSolutions((prev) => ({
+          ...prev,
+          [questionId]: "שגיאה בתקשורת עם מנוע הפתרונות.",
+        }));
+      } finally {
+        setLoadingSolutions((prev) => ({ ...prev, [questionId]: false }));
+      }
+    }
   };
 
   if (loading) {
@@ -78,15 +108,14 @@ export default function FocusedStudyPage() {
   return (
     <div className="max-w-4xl mx-auto p-6 dir-rtl" dir="rtl">
       <div className="mb-6">
-        <h1 className="text-2xl font-bold text-gray-900">🎯 תרגול ממוקד: נושאי חובה קבועים</h1>
+        <h1 className="text-2xl font-bold text-gray-900">🎯 תרגול ממוקד מתוך ספר הקורס</h1>
         <p className="text-xs text-gray-500 mt-1">
-          מצב תרגול זה מרכז אך ורק שאלות מתוך נושאים המופיעים ב-80% ומעלה ממבחני העבר.
+          כל הפתרונות וההסברים נגזרים אך ורק מספרו הרשמי של הקורס.
         </p>
       </div>
 
-      {/* תגיות נושאי החובה שנמצאו */}
       <div className="bg-white p-4 rounded-xl border mb-6 shadow-sm">
-        <h2 className="text-xs font-bold text-gray-700 mb-2">נושאי החובה שנכללים בתרגול זה:</h2>
+        <h2 className="text-xs font-bold text-gray-700 mb-2">נושאי חובה שנכללים בתרגול:</h2>
         <div className="flex flex-wrap gap-2">
           {mandatoryTopics.length === 0 ? (
             <span className="text-xs text-gray-400">לא זוהו נושאי חובה בסיכון גבוה (80%+ שכיחות).</span>
@@ -103,7 +132,6 @@ export default function FocusedStudyPage() {
         </div>
       </div>
 
-      {/* רשימת השאלות לתרגול */}
       <div className="space-y-6">
         {questions.length === 0 ? (
           <div className="text-center p-8 bg-gray-50 rounded-xl border text-gray-500 text-sm">
@@ -128,26 +156,30 @@ export default function FocusedStudyPage() {
                 )}
               </div>
 
-              {/* הערת אזהרה / דגשים במידה וזו שאלת מלכודת */}
               {q.guidance_notes && (
                 <div className="bg-amber-50 border border-amber-200 p-3 rounded-lg text-xs text-amber-900">
                   <strong>💡 דגש AI לשאלה זו:</strong> {q.guidance_notes}
                 </div>
               )}
 
-              {/* כפתור וחשיפת פתרון */}
               <div>
                 <button
                   onClick={() => toggleSolution(q.id)}
-                  className="text-xs font-bold text-blue-600 hover:underline"
+                  className="text-xs font-bold text-blue-600 hover:underline flex items-center gap-1"
                 >
-                  {showSolution[q.id] ? "הסתר פתרון" : "הצג פתרון מלא ←"}
+                  {showSolution[q.id] ? "הסתר פתרון" : "📖 הצג פתרון מתוך ספר הקורס ←"}
                 </button>
 
                 {showSolution[q.id] && (
-                  <div className="mt-3 bg-gray-50 p-4 rounded-lg border border-gray-200 text-xs text-gray-800 space-y-2">
-                    <strong className="block text-gray-900">פתרון:</strong>
-                    <p className="whitespace-pre-line leading-relaxed">{q.solution_text || "אין פתרון מפורט."}</p>
+                  <div className="mt-3 bg-blue-50/50 p-4 rounded-lg border border-blue-100 text-xs text-gray-800 space-y-2">
+                    <strong className="block text-blue-900">פתרון רשמי מספר הקורס:</strong>
+                    {loadingSolutions[q.id] ? (
+                      <p className="text-gray-500 animate-pulse">שולף פתרון ומצליב מול ספר הקורס...</p>
+                    ) : (
+                      <p className="whitespace-pre-line leading-relaxed">
+                        {dynamicSolutions[q.id] || q.solution_text || "אין פתרון זמין."}
+                      </p>
+                    )}
                   </div>
                 )}
               </div>
