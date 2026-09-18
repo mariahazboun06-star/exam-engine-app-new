@@ -72,7 +72,6 @@ export default function FocusedStudyPage() {
     const isCurrentlyShown = showSolution[questionId];
     setShowSolution((prev) => ({ ...prev, [questionId]: !isCurrentlyShown }));
 
-    // יצירת פתרון המבוסס על ספר הקורס במידה וטרם נשלף
     if (!isCurrentlyShown && !dynamicSolutions[questionId] && courseId) {
       setLoadingSolutions((prev) => ({ ...prev, [questionId]: true }));
       try {
