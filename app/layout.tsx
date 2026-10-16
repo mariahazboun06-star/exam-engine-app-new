@@ -1,10 +1,10 @@
-import type { Metadata } from "next";
-import "./globals.css";
-import Link from "next/link";
+import type { Metadata } from 'next';
+import Navbar from '@/app/components/Navbar';
+import './globals.css';
 
 export const metadata: Metadata = {
-  title: "SS - Study Smarter",
-  description: "מערכת למידה ותרגול חכמה המבוססת על חומרי הקורס בלבד",
+  title: 'PrepEngine | Smart Student Hub',
+  description: 'Dynamic spaced repetition and exam mastery platform',
 };
 
 export default function RootLayout({
@@ -13,30 +13,12 @@ export default function RootLayout({
   children: React.ReactNode;
 }) {
   return (
-    <html lang="he" dir="rtl">
-      <body className="bg-gray-50 min-h-screen text-gray-900 font-sans">
-        {/* סרגל ניווט ראשי (Navbar) */}
-        <header className="bg-white border-b sticky top-0 z-50 shadow-sm">
-          <div className="max-w-6xl mx-auto px-6 h-16 flex justify-between items-center">
-            {/* מותג ושם התוכנה */}
-            <Link href="/" className="flex items-center gap-2 font-extrabold text-xl text-blue-600">
-              <span className="bg-blue-600 text-white px-2.5 py-1 rounded-lg text-sm font-black shadow-sm">
-                SS
-              </span>
-              <span>Study Smarter</span>
-            </Link>
-
-            {/* קישורי ניווט */}
-            <nav className="flex items-center gap-6 text-xs font-bold text-gray-600">
-              <Link href="/setup" className="hover:text-blue-600 transition">⚙️ הקמת קורס</Link>
-              <Link href="/matrix" className="hover:text-blue-600 transition">📊 מטריצה</Link>
-              <Link href="/study/focused" className="hover:text-blue-600 transition">🎯 תרגול ממוקד</Link>
-              <Link href="/exam/simulation" className="hover:text-blue-600 transition">📝 סימולטור מבחן</Link>
-            </nav>
-          </div>
-        </header>
-
-        <main>{children}</main>
+    <html lang="en" className="h-full">
+      <body className="h-full bg-slate-50 text-slate-900 font-sans antialiased selection:bg-indigo-500 selection:text-white">
+        <div className="min-h-screen flex flex-col">
+          <Navbar />
+          <main className="flex-1 pb-16">{children}</main>
+        </div>
       </body>
     </html>
   );

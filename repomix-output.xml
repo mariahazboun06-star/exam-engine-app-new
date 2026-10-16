@@ -1,0 +1,4387 @@
+This file is a merged representation of the entire codebase, combined into a single document by Repomix.
+
+<file_summary>
+This section contains a summary of this file.
+
+<purpose>
+This file contains a packed representation of the entire repository's contents.
+It is designed to be easily consumable by AI systems for analysis, code review,
+or other automated processes.
+</purpose>
+
+<file_format>
+The content is organized as follows:
+1. This summary section
+2. Repository information
+3. Directory structure
+4. Repository files (if enabled)
+5. Multiple file entries, each consisting of:
+  - File path as an attribute
+  - Full contents of the file
+</file_format>
+
+<usage_guidelines>
+- This file should be treated as read-only. Any changes should be made to the
+  original repository files, not this packed version.
+- When processing this file, use the file path to distinguish
+  between different files in the repository.
+- Be aware that this file may contain sensitive information. Handle it with
+  the same level of security as you would the original repository.
+</usage_guidelines>
+
+<notes>
+- Some files may have been excluded based on .gitignore rules and Repomix's configuration
+- Binary files are not included in this packed representation. Please refer to the Repository Structure section for a complete list of file paths, including binary files
+- Files matching patterns in .gitignore are excluded
+- Files matching default ignore patterns are excluded
+- Files are sorted by Git change count (files with more changes are at the bottom)
+</notes>
+
+</file_summary>
+
+<directory_structure>
+app/
+  api/
+    ai/
+      generate-map/
+        route.ts
+      parse-exam/
+        route.ts
+    exam/
+      grade-image/
+        route.ts
+    extract-topics/
+      route.ts
+    ingest/
+      summaries/
+        route.ts
+      upload/
+        route.ts
+    ingest-booklet/
+      route.ts
+    ingest-exam/
+      route.ts
+    plan/
+      generate/
+        route.ts
+    solve/
+      route.ts
+    study/
+      progress/
+        route.ts
+  components/
+    Navbar.tsx
+  context-input/
+    page.tsx
+  courses/
+    [courseId]/
+      page.tsx
+  create-exam/
+    page.tsx
+  dashboard/
+    page.tsx
+  exams/
+    [id]/
+      page.tsx
+    simulation/
+      page.tsx
+    page.tsx
+  login/
+    page.tsx
+  matrix/
+    page.tsx
+  plan/
+    page.tsx
+  setup/
+    page.tsx
+  study/
+    focused/
+      page.tsx
+    page.tsx
+  topics/
+    page.tsx
+  actions.ts
+  favicon.ico
+  globals.css
+  layout.tsx
+  page.tsx
+lib/
+  services/
+    analyticsService.ts
+    geminiService.ts
+    ingestionService.ts
+    plannerService.ts
+  supabaseClient.ts
+public/
+  file.svg
+  globe.svg
+  next.svg
+  vercel.svg
+  window.svg
+supabase/
+  migrations/
+    20260822_course_ingestion.sql
+.gitignore
+AGENTS.md
+CLAUDE.md
+eslint.config.mjs
+next.config.ts
+package.json
+postcss.config.mjs
+README.md
+tsconfig.json
+</directory_structure>
+
+<files>
+This section contains the contents of the repository's files.
+
+<file path="app/api/ai/generate-map/route.ts">
+import { NextResponse } from 'next/server';
+import { supabase } from '../../../../lib/supabaseClient';
+import { generateCourseKnowledgeMap } from '../../../../lib/services/geminiService';
+
+export async function POST(request: Request) {
+  try {
+    const { data: { user }, error: authError } = await supabase.auth.getUser();
+    if (authError || !user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+
+    const body = await request.json();
+    const { courseId } = body;
+    if (!courseId) return NextResponse.json({ error: 'Missing courseId' }, { status: 400 });
+
+    // 1. Find the syllabus for this course in the database
+    const { data: fileRecord, error: fileError } = await supabase
+      .from('course_files')
+      .select('storage_path')
+      .eq('course_id', courseId)
+      .eq('file_type', 'syllabus')
+      .single();
+
+    if (fileError || !fileRecord) {
+      return NextResponse.json({ error: 'Syllabus not found for this course.' }, { status: 404 });
+    }
+
+    // 2. Download the file from Supabase Storage
+    const { data: fileData, error: downloadError } = await supabase.storage
+      .from('course-materials')
+      .download(fileRecord.storage_path);
+
+    if (downloadError || !fileData) {
+      return NextResponse.json({ error: 'Failed to download syllabus from storage.' }, { status: 500 });
+    }
+
+    const buffer = Buffer.from(await fileData.arrayBuffer());
+
+    // 3. Process with Gemini
+    const knowledgeMapJson = await generateCourseKnowledgeMap(buffer, fileData.type);
+
+    // 4. Save the generated map to Supabase
+    const { data: savedMap, error: insertError } = await supabase
+      .from('course_knowledge_maps')
+      .upsert({
+        course_id: courseId,
+        user_id: user.id,
+        map_data: knowledgeMapJson
+      }, { onConflict: 'course_id' })
+      .select()
+      .single();
+
+    if (insertError) throw new Error("Database insert failed: " + insertError.message);
+
+    // 5. Update the ingestion status
+    await supabase.from('course_files').update({ ingestion_status: 'completed' }).eq('course_id', courseId);
+
+    return NextResponse.json({
+      message: 'Knowledge map generated successfully.',
+      data: savedMap
+    }, { status: 200 });
+
+  } catch (error: any) {
+    console.error("AI Generation Error:", error);
+    return NextResponse.json({ error: error.message || 'Server error during AI generation.' }, { status: 500 });
+  }
+}
+</file>
+
+<file path="app/api/exam/grade-image/route.ts">
+import { NextResponse } from "next/server";
+import { supabase } from "@/lib/supabaseClient";
+import { GoogleGenerativeAI } from "@google/generative-ai";
+
+const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY || "");
+
+export async function POST(request: Request) {
+  try {
+    const formData = await request.formData();
+    const questionId = formData.get("questionId") as string;
+    const courseId = formData.get("courseId") as string;
+    const file = formData.get("file") as File;
+
+    if (!questionId || !file) {
+      return NextResponse.json({ error: "יש לספק מזהה שאלה ותמונה לבדיקה" }, { status: 400 });
+    }
+
+    // 1. שליפת השאלה וחומרי הקורס הרשמיים ב-Strict Grounding
+    const [{ data: question }, { data: courseMaterials }] = await Promise.all([
+      supabase.from("exam_questions").select("*").eq("id", questionId).single(),
+      supabase.from("course_materials").select("content").eq("course_id", courseId),
+    ]);
+
+    const textbookContext = courseMaterials?.map((m) => m.content).join("\n\n") || "";
+
+    // 2. המרת התמונה ל-Base64 ופענוח מול Gemini Vision
+    const arrayBuffer = await file.arrayBuffer();
+    const base64Data = Buffer.from(arrayBuffer).toString("base64");
+
+    const model = genAI.getGenerativeModel({
+      model: "gemini-1.5-flash",
+      systemInstruction: `
+        אתה מעריך אקדמי קפדן במבחן מסכם. תפקידך לבדוק פתרון פתוח שנכתב בכתב יד בתמונה.
+        חובת הסתמכות קשיחה (Strict Grounding) אך ורק על ספר הקורס והפתרון הרשמי.
+
+        משימות בדיקה:
+        1. פענח את כתב היד בתמונה (דרך הפתרון והתוצאה הסופית).
+        2. בדוק את נכונות כל שלבי הדרך המתמטית/לוגית מול חומר הקורס.
+        3. החזר מענה במבנה JSON תקין בלבד (ללא טקסט נוסף):
+           {
+             "isCorrect": boolean,
+             "score": number (0-100),
+             "transcribedText": "הטקסט והנוסחאות שפענחת מתוך תמונת כתב היד",
+             "feedback": "משוב מפורט: איפה הדרך נכונה, איפה הטעות, ואיך נדרש לפתור לפי ספר הקורס"
+           }
+      `,
+    });
+
+    const result = await model.generateContent([
+      {
+        inlineData: {
+          data: base64Data,
+          mimeType: file.type || "image/jpeg",
+        },
+      },
+      `
+      שאלת המבחן: ${question?.question_text || ""}
+      פתרון הייחוס הרשמי: ${question?.solution_text || ""}
+      חומר הקורס הרשמי: ${textbookContext.slice(0, 3000)}
+      `,
+    ]);
+
+    const responseText = result.response.text();
+    const cleanedJson = responseText.replace(/```json/g, "").replace(/```/g, "").trim();
+    const parsedEvaluation = JSON.parse(cleanedJson);
+
+    return NextResponse.json({ success: true, ...parsedEvaluation });
+  } catch (err: any) {
+    return NextResponse.json(
+      { error: err.message || "שגיאה בניתוח תמונת הפתרון" },
+      { status: 500 }
+    );
+  }
+}
+</file>
+
+<file path="app/api/ingest/summaries/route.ts">
+import { NextResponse } from "next/server";
+import { supabase } from "@/lib/supabaseClient";
+import { GoogleGenerativeAI } from "@google/generative-ai";
+
+const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY || "");
+
+export async function POST(request: Request) {
+  try {
+    const formData = await request.formData();
+    const courseId = formData.get("courseId") as string;
+    const files = formData.getAll("files") as File[];
+
+    if (!courseId || !files || files.length === 0) {
+      return NextResponse.json({ error: "יש לספק מזהה קורס וקבצים להעלאה" }, { status: 400 });
+    }
+
+    const model = genAI.getGenerativeModel({
+      model: "gemini-1.5-flash",
+      systemInstruction: `
+        אתה מומחה OCR ופענוח מסמכים אקדמיים.
+        תפקידך לקרוא קבצי סיכום, כולל מחברות בחינה וסיכומים בכתב יד (גם אם הכתב לא קריא לחלוטין).
+        
+        הנחיות:
+        1. תרגם וחלץ את כל הטקסט המופיע במסמך/בתמונה בדיוק מרבי.
+        2. ארגן את הטקסט המפוענח בצורה מובנית לפי נושאי לימוד, הגדרות, נוסחאות ודוגמאות.
+        3. אל תחסיר פרטים לימודיים.
+      `,
+    });
+
+    const processedMaterials = [];
+
+    for (const file of files) {
+      const arrayBuffer = await file.arrayBuffer();
+      const base64Data = Buffer.from(arrayBuffer).toString("base64");
+
+      // שליחת הקובץ (תמונה/PDF) לפענוח כתב יד ב-Gemini
+      const result = await model.generateContent([
+        {
+          inlineData: {
+            data: base64Data,
+            mimeType: file.type || "application/pdf",
+          },
+        },
+        "פענח את כתב היד והטקסט בסיכום זה וסדר אותו כחומר לימוד רשמי לקורס.",
+      ]);
+
+      const transcribedText = result.response.text();
+
+      // שמירת המידע המפוענח ב-Supabase
+      const { data, error } = await supabase.from("course_materials").insert({
+        course_id: courseId,
+        material_type: "summary",
+        file_name: file.name,
+        content: transcribedText,
+      }).select().single();
+
+      if (error) throw error;
+      processedMaterials.push(data);
+    }
+
+    return NextResponse.json({
+      success: true,
+      message: `עובדו ונשמרו בהצלחה ${processedMaterials.length} סיכומים.`,
+    });
+  } catch (err: any) {
+    return NextResponse.json(
+      { error: err.message || "שגיאה בפענוח ועיבוד הסיכומים" },
+      { status: 500 }
+    );
+  }
+}
+</file>
+
+<file path="app/api/ingest/upload/route.ts">
+import { NextResponse } from 'next/server';
+// Using relative paths to fix the module not found error
+import { supabase } from '../../../../lib/supabaseClient';
+import { validateIngestionBatch } from '../../../../lib/services/ingestionService';
+
+export async function POST(request: Request) {
+  try {
+    // We removed createClient() and are using the imported 'supabase' instance directly
+    const { data: { user }, error: authError } = await supabase.auth.getUser();
+
+    if (authError || !user) {
+      return NextResponse.json({ error: 'Unauthorized access.' }, { status: 401 });
+    }
+
+    const formData = await request.formData();
+    const courseId = formData.get('courseId') as string;
+    const syllabus = formData.get('syllabus') as File;
+    const textbook = formData.get('textbook') as File;
+    const examFiles = formData.getAll('exams') as File[];
+
+    if (!courseId) {
+      return NextResponse.json({ error: 'Missing courseId parameter.' }, { status: 400 });
+    }
+
+    // Server-side validation check for 20+ exams rule
+    const validation = validateIngestionBatch(examFiles.length, !!syllabus, !!textbook);
+    if (!validation.valid) {
+      return NextResponse.json({ error: 'Validation failed', details: validation.errors }, { status: 422 });
+    }
+
+    return NextResponse.json({
+      message: 'Batch uploaded and queued for processing successfully.',
+      status: 'pending_processing',
+      filesCount: 2 + examFiles.length
+    }, { status: 200 });
+
+  } catch (error: any) {
+    return NextResponse.json({ error: error.message || 'Server error during batch ingestion.' }, { status: 500 });
+  }
+}
+</file>
+
+<file path="app/api/ingest-booklet/route.ts">
+import { NextResponse } from "next/server";
+import { supabase } from "@/lib/supabaseClient";
+import { parseCourseBooklet } from "@/lib/services/geminiService";
+
+export async function POST(request: Request) {
+  try {
+    const { courseId } = await request.json();
+    if (!courseId) {
+      return NextResponse.json({ error: "Missing courseId" }, { status: 400 });
+    }
+
+    // 1. שליפת קובץ החוברת המעודכן מתוך course_files
+    const { data: files } = await supabase
+      .from("course_files")
+      .select("file_path")
+      .eq("course_id", courseId)
+      .eq("file_type", "booklet")
+      .order("created_at", { ascending: false })
+      .limit(1);
+
+    if (!files || files.length === 0) {
+      return NextResponse.json({ error: "Course booklet file not found" }, { status: 404 });
+    }
+
+    // 2. הורדת הקובץ מ-Supabase Storage
+    const { data: blob, error: downloadError } = await supabase.storage
+      .from("course-materials")
+      .download(files[0].file_path);
+
+    if (downloadError || !blob) {
+      throw new Error("Failed to download booklet file from storage");
+    }
+
+    const arrayBuffer = await blob.arrayBuffer();
+    const buffer = Buffer.from(arrayBuffer);
+
+    // 3. ניתוח החוברת באמצעות Gemini
+    const items = await parseCourseBooklet(buffer, "application/pdf");
+
+    // 4. שליפת topic ברירת מחדל לקישור (או הנושא הראשון)
+    const { data: topics } = await supabase
+      .from("course_topics")
+      .select("id")
+      .eq("course_id", courseId)
+      .limit(1);
+
+    const defaultTopicId = topics?.[0]?.id || null;
+
+    // 5. הכנת הפריטים לשמירה ב-Database
+    const conceptsToInsert = items.map((item: any) => ({
+      course_id: courseId,
+      topic_id: defaultTopicId,
+      concept_name: item.conceptName,
+      item_type: item.itemType || "concept",
+      recall_prompt: item.recallPrompt,
+      recall_answer: item.recallAnswer,
+      detailed_explanation: item.detailedExplanation || "",
+      description: item.detailedExplanation || "",
+      status_color: "red"
+    }));
+
+    const { data: inserted, error: insertError } = await supabase
+      .from("course_concepts")
+      .insert(conceptsToInsert)
+      .select();
+
+    if (insertError) {
+      throw new Error("Failed to save booklet items: " + insertError.message);
+    }
+
+    return NextResponse.json({
+      success: true,
+      insertedCount: inserted?.length || 0
+    });
+  } catch (err: any) {
+    return NextResponse.json(
+      { error: err.message || "Failed to process course booklet" },
+      { status: 500 }
+    );
+  }
+}
+</file>
+
+<file path="app/api/ingest-exam/route.ts">
+import { NextResponse } from "next/server";
+import { supabase } from "@/lib/supabaseClient";
+import { parseExamQuestions } from "@/lib/services/geminiService";
+
+export async function POST(request: Request) {
+  try {
+    const { courseId, examId } = await request.json();
+    if (!courseId) {
+      return NextResponse.json({ error: "Missing courseId" }, { status: 400 });
+    }
+
+    // 1. שליפת רשימת הנושאים הקיימים בסילבוס הקורס
+    const { data: topics, error: topicsErr } = await supabase
+      .from("course_topics")
+      .select("id, title")
+      .eq("course_id", courseId);
+
+    if (topicsErr || !topics) {
+      throw new Error("Failed to fetch course topics for classification");
+    }
+
+    // 2. שליפת קובץ המבחן מתוך course_files
+    const { data: files } = await supabase
+      .from("course_files")
+      .select("file_path")
+      .eq("course_id", courseId)
+      .eq("file_type", "exam")
+      .order("created_at", { ascending: false })
+      .limit(1);
+
+    if (!files || files.length === 0) {
+      return NextResponse.json({ error: "Exam file not found" }, { status: 404 });
+    }
+
+    // 3. הורדת הקובץ מ-Supabase Storage
+    const { data: blob, error: downloadError } = await supabase.storage
+      .from("course-materials")
+      .download(files[0].file_path);
+
+    if (downloadError || !blob) {
+      throw new Error("Failed to download exam file");
+    }
+
+    const buffer = Buffer.from(await blob.arrayBuffer());
+
+    // 4. ניתוח וסיווג השאלות בעזרת Gemini
+    const questions = await parseExamQuestions(buffer, "application/pdf", topics);
+
+    // 5. שמירת השאלות המסווגות ב-Database
+    const questionsToInsert = questions.map((q: any) => ({
+      course_id: courseId,
+      exam_id: examId || null,
+      question_number: q.questionNumber,
+      question_text: q.questionText,
+      is_trap: q.isTrap || false,
+      topic_id: q.topicId || null,
+      guidance_notes: q.guidanceNotes || "",
+      solution_text: q.solutionText || ""
+    }));
+
+    const { data: insertedQuestions, error: insertErr } = await supabase
+      .from("exam_questions")
+      .insert(questionsToInsert)
+      .select();
+
+    if (insertErr) throw insertErr;
+
+    // 6. חישוב ועדכון שכיחות ומשקל הנושאים במבחנים (course_topic_stats)
+    const { data: allCourseQuestions } = await supabase
+      .from("exam_questions")
+      .select("topic_id")
+      .eq("course_id", courseId);
+
+    const totalQuestionsCount = allCourseQuestions?.length || 0;
+
+    if (totalQuestionsCount > 0) {
+      const countsByTopic: Record<string, number> = {};
+      allCourseQuestions?.forEach((q) => {
+        if (q.topic_id) {
+          countsByTopic[q.topic_id] = (countsByTopic[q.topic_id] || 0) + 1;
+        }
+      });
+
+      const statsUpserts = Object.keys(countsByTopic).map((tId) => ({
+        course_id: courseId,
+        topic_id: tId,
+        question_count: countsByTopic[tId],
+        appearance_percentage: Number(((countsByTopic[tId] / totalQuestionsCount) * 100).toFixed(1))
+      }));
+
+      if (statsUpserts.length > 0) {
+        await supabase
+          .from("course_topic_stats")
+          .upsert(statsUpserts, { onConflict: "course_id,topic_id" });
+      }
+    }
+
+    return NextResponse.json({
+      success: true,
+      insertedCount: insertedQuestions?.length || 0
+    });
+  } catch (err: any) {
+    return NextResponse.json(
+      { error: err.message || "Failed to process exam" },
+      { status: 500 }
+    );
+  }
+}
+</file>
+
+<file path="app/api/solve/route.ts">
+import { NextResponse } from "next/server";
+import { supabase } from "@/lib/supabaseClient";
+import { GoogleGenerativeAI } from "@google/generative-ai";
+
+const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY || "");
+
+export async function POST(request: Request) {
+  try {
+    const { questionId, courseId } = await request.json();
+
+    // 1. שליפת השאלה וטקסט ספר הקורס מתוך Supabase
+    const [{ data: question }, { data: courseMaterials }] = await Promise.all([
+      supabase.from("exam_questions").select("*").eq("id", questionId).single(),
+      supabase.from("course_materials").select("content").eq("course_id", courseId),
+    ]);
+
+    if (!question || !courseMaterials || courseMaterials.length === 0) {
+      return NextResponse.json(
+        { error: "לא נמצא טקסט עבור ספר הקורס במסד הנתונים" },
+        { status: 400 }
+      );
+    }
+
+    const textbookText = courseMaterials.map((m) => m.content).join("\n\n");
+
+    // 2. הגדרת מודל Gemini עם הנחיית הסתמכות קשיחה (Strict Grounding)
+    const model = genAI.getGenerativeModel({
+      model: "gemini-1.5-flash",
+      systemInstruction: `
+        אתה עוזר הוראה אקדמי המבוסס על "הסתמכות קשיחה" (Strict Grounding).
+        תפקידך לענות על שאלות ולספק פתרונות אך ורק מתוך טקסט "ספר הקורס" המצורף למטה.
+        
+        חוקי ברזל:
+        1. השתמש אך ורק במידע המופיע מפורשות בטקסט ספר הקורס.
+        2. אסור להשתמש בשום ידע חיצוני או הנחות שאינן מופיעות בספר הקורס.
+        3. אם הפתרון או הנושא אינם מופיעים בספר הקורס, ענה בדיוק: "הפתרון אינו מופיע בספר הקורס."
+        4. לבלב או המצאת מידע (Hallucination) אינה מורשית תחת שום נסיבות.
+      `,
+    });
+
+    const prompt = `
+      ספר הקורס המלא:
+      ---
+      ${textbookText}
+      ---
+
+      השאלה לפתרון:
+      ${question.question_text}
+
+      ספק פתרון מפורט והסבר המבוסס 100% על ספר הקורס בלבד.
+    `;
+
+    const result = await model.generateContent(prompt);
+    const answer = result.response.text();
+
+    return NextResponse.json({ success: true, answer });
+  } catch (err: any) {
+    return NextResponse.json(
+      { error: err.message || "שגיאה ביצירת פתרון המבוסס על ספר הקורס" },
+      { status: 500 }
+    );
+  }
+}
+</file>
+
+<file path="app/components/Navbar.tsx">
+'use client';
+
+import Link from 'next/link';
+import { useEffect, useState } from 'react';
+import { supabase } from '@/lib/supabaseClient';
+import { useRouter } from 'next/navigation';
+
+export default function Navbar() {
+  const [user, setUser] = useState<any>(null);
+  const router = useRouter();
+
+  useEffect(() => {
+    // 1. Check if a user is already logged in when the page loads
+    supabase.auth.getSession().then(({ data: { session } }) => {
+      setUser(session?.user ?? null);
+    });
+
+    // 2. Listen for any login or logout events
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+      setUser(session?.user ?? null);
+    });
+
+    return () => subscription.unsubscribe();
+  }, []);
+
+  const handleLogout = async () => {
+    await supabase.auth.signOut();
+    router.push('/'); // Send them back to the home page after logging out
+  };
+
+  return (
+    <nav className="bg-white shadow-sm border-b border-gray-200">
+      <div className="max-w-4xl mx-auto px-6 py-4 flex justify-between items-center">
+        <Link href="/" className="text-2xl font-black text-blue-700 tracking-tight">
+          ExamEngine
+        </Link>
+        
+        <div className="space-x-4 flex items-center">
+          <Link href="/exams" className="text-gray-600 hover:text-blue-600 font-medium">
+            Student View
+          </Link>
+
+          {/* This is the smart part! If 'user' exists, show Teacher tools. If not, show Login. */}
+          {user ? (
+            <>
+              <Link href="/dashboard" className="text-gray-600 hover:text-blue-600 font-medium">
+                Teacher Dashboard
+              </Link>
+              <Link href="/create-exam" className="px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 font-medium transition-colors">
+                + Create Exam
+              </Link>
+              <button 
+                onClick={handleLogout} 
+                className="px-4 py-2 bg-gray-200 text-gray-800 rounded-md hover:bg-gray-300 font-medium transition-colors ml-4"
+              >
+                Log Out
+              </button>
+            </>
+          ) : (
+            <Link href="/login" className="px-4 py-2 bg-gray-800 text-white rounded-md hover:bg-gray-900 font-medium transition-colors ml-4">
+              Log In
+            </Link>
+          )}
+        </div>
+      </div>
+    </nav>
+  );
+}
+</file>
+
+<file path="app/courses/[courseId]/page.tsx">
+"use client";
+
+import Link from "next/link";
+import { useParams } from "next/navigation";
+
+export default function CourseHubPage() {
+  const params = useParams();
+  const courseId = params.courseId as string;
+
+  return (
+    <div className="max-w-5xl mx-auto p-6 dir-rtl space-y-8" dir="rtl">
+      <div>
+        <h1 className="text-2xl font-bold text-gray-900">🎓 מרכז המשאבים והתרגול של הקורס</h1>
+        <p className="text-xs text-gray-500 mt-1">נהל את חומרי הלימוד, בחן שכיחות נושאים ותרגל בזמן אמת.</p>
+      </div>
+
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+        {/* 1. העלאת סילבוס, מבחנים וכתב יד */}
+        <Link
+          href={`/setup?courseId=${courseId}`}
+          className="bg-white p-6 rounded-xl border hover:border-blue-500 hover:shadow-md transition space-y-2"
+        >
+          <div className="text-2xl">📥</div>
+          <h2 className="font-bold text-base text-gray-900">1. העלאת חומרים וסיכומים</h2>
+          <p className="text-xs text-gray-500">העלאת סילבוסים, מבחנים וסיכומים בכתב יד לפענוח AI.</p>
+        </Link>
+
+        {/* 2. מטריצת שכיחות */}
+        <Link
+          href={`/matrix?courseId=${courseId}`}
+          className="bg-white p-6 rounded-xl border hover:border-blue-500 hover:shadow-md transition space-y-2"
+        >
+          <div className="text-2xl">📊</div>
+          <h2 className="font-bold text-base text-gray-900">2. מטריצת נושאי חובה</h2>
+          <p className="text-xs text-gray-500">ניתוח שכיחות נושאים ממבחני עבר וזיהוי נושאים קריטיים (80%+).</p>
+        </Link>
+
+        {/* 3. תרגול ממוקד */}
+        <Link
+          href={`/study/focused?courseId=${courseId}`}
+          className="bg-white p-6 rounded-xl border hover:border-blue-500 hover:shadow-md transition space-y-2"
+        >
+          <div className="text-2xl">🎯</div>
+          <h2 className="font-bold text-base text-gray-900">3. תרגול ממוקד ומפת חום</h2>
+          <p className="text-xs text-gray-500">תרגול שאלות מבוססות ספר הקורס עם סימון ירוק/אדום.</p>
+        </Link>
+
+        {/* 4. סימולטור מבחן */}
+        <Link
+          href={`/exam/simulation?courseId=${courseId}`}
+          className="bg-white p-6 rounded-xl border hover:border-blue-500 hover:shadow-md transition space-y-2"
+        >
+          <div className="text-2xl">📝</div>
+          <h2 className="font-bold text-base text-gray-900">4. סימולציית מבחן בזמן אמת</h2>
+          <p className="text-xs text-gray-500">הדמיית מבחן אמת כולל בדיקת פתרונות פתוחים מתמונות כתב יד.</p>
+        </Link>
+      </div>
+    </div>
+  );
+}
+</file>
+
+<file path="app/create-exam/page.tsx">
+'use client';
+
+import { useState } from 'react';
+import { supabase } from '@/lib/supabaseClient';
+
+interface QuestionInput {
+  questionText: string;
+  options: string[];
+  correctAnswer: string;
+}
+
+export default function CreateExamPage() {
+  const [title, setTitle] = useState('');
+  const [description, setDescription] = useState('');
+  const [questions, setQuestions] = useState<QuestionInput[]>([
+    { questionText: '', options: ['', '', '', ''], correctAnswer: '' },
+  ]);
+  const [loading, setLoading] = useState(false);
+  const [message, setMessage] = useState('');
+
+  const handleQuestionChange = (index: number, field: string, value: string) => {
+    const updated = [...questions];
+    if (field === 'questionText') updated[index].questionText = value;
+    if (field === 'correctAnswer') updated[index].correctAnswer = value;
+    setQuestions(updated);
+  };
+
+  const handleOptionChange = (qIndex: number, oIndex: number, value: string) => {
+    const updated = [...questions];
+    updated[qIndex].options[oIndex] = value;
+    setQuestions(updated);
+  };
+
+  const addQuestion = () => {
+    setQuestions([
+      ...questions,
+      { questionText: '', options: ['', '', '', ''], correctAnswer: '' },
+    ]);
+  };
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setLoading(true);
+    setMessage('');
+
+    try {
+      // 1. Insert Exam into Database
+      const { data: examData, error: examError } = await supabase
+        .from('exams')
+        .insert([{ title, description }])
+        .select()
+        .single();
+
+      if (examError) throw examError;
+
+      // 2. Prepare & Insert Questions
+      const questionsToInsert = questions.map((q) => ({
+        exam_id: examData.id,
+        question_text: q.questionText,
+        options: q.options,
+        correct_answer: q.correctAnswer,
+      }));
+
+      const { error: questionsError } = await supabase
+        .from('questions')
+        .insert(questionsToInsert);
+
+      if (questionsError) throw questionsError;
+
+      setMessage('Exam created and saved to Supabase successfully!');
+      setTitle('');
+      setDescription('');
+      setQuestions([{ questionText: '', options: ['', '', '', ''], correctAnswer: '' }]);
+    } catch (err: any) {
+      setMessage(`Error saving exam: ${err.message}`);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div className="max-w-3xl mx-auto p-6 bg-white shadow-md rounded-lg mt-10">
+      <h1 className="text-2xl font-bold mb-6 text-gray-800">Create New Exam</h1>
+
+      {message && (
+        <div className={`p-4 mb-4 rounded ${message.startsWith('Error') ? 'bg-red-100 text-red-700' : 'bg-green-100 text-green-700'}`}>
+          {message}
+        </div>
+      )}
+
+      <form onSubmit={handleSubmit} className="space-y-6">
+        <div>
+          <label className="block text-sm font-medium text-gray-700 mb-1">Exam Title</label>
+          <input
+            type="text"
+            required
+            value={title}
+            onChange={(e) => setTitle(e.target.value)}
+            className="w-full border border-gray-300 rounded-md p-2 text-gray-900 focus:outline-none focus:ring-2 focus:ring-blue-500"
+            placeholder="e.g., Mathematics Midterm"
+          />
+        </div>
+
+        <div>
+          <label className="block text-sm font-medium text-gray-700 mb-1">Description</label>
+          <textarea
+            value={description}
+            onChange={(e) => setDescription(e.target.value)}
+            className="w-full border border-gray-300 rounded-md p-2 text-gray-900 focus:outline-none focus:ring-2 focus:ring-blue-500"
+            placeholder="e.g., Covers chapters 1 through 4"
+          />
+        </div>
+
+        <hr className="my-6 border-gray-200" />
+
+        <h2 className="text-xl font-semibold text-gray-800">Questions</h2>
+
+        {questions.map((q, qIdx) => (
+          <div key={qIdx} className="p-4 border border-gray-200 rounded-md bg-gray-50 space-y-4">
+            <h3 className="font-medium text-gray-700">Question {qIdx + 1}</h3>
+
+            <div>
+              <input
+                type="text"
+                required
+                value={q.questionText}
+                onChange={(e) => handleQuestionChange(qIdx, 'questionText', e.target.value)}
+                className="w-full border border-gray-300 rounded-md p-2 text-gray-900 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                placeholder="Enter question text"
+              />
+            </div>
+
+            <div className="grid grid-cols-2 gap-3">
+              {q.options.map((opt, oIdx) => (
+                <div key={oIdx}>
+                  <label className="block text-xs font-medium text-gray-500 mb-1">Option {oIdx + 1}</label>
+                  <input
+                    type="text"
+                    required
+                    value={opt}
+                    onChange={(e) => handleOptionChange(qIdx, oIdx, e.target.value)}
+                    className="w-full border border-gray-300 rounded-md p-2 text-gray-900 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    placeholder={`Option ${oIdx + 1}`}
+                  />
+                </div>
+              ))}
+            </div>
+
+            <div>
+              <label className="block text-xs font-medium text-gray-500 mb-1">Correct Answer</label>
+              <input
+                type="text"
+                required
+                value={q.correctAnswer}
+                onChange={(e) => handleQuestionChange(qIdx, 'correctAnswer', e.target.value)}
+                className="w-full border border-gray-300 rounded-md p-2 text-gray-900 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                placeholder="Must match one option exactly"
+              />
+            </div>
+          </div>
+        ))}
+
+        <button
+          type="button"
+          onClick={addQuestion}
+          className="px-4 py-2 bg-gray-200 text-gray-800 rounded-md hover:bg-gray-300 text-sm font-medium"
+        >
+          + Add Another Question
+        </button>
+
+        <div>
+          <button
+            type="submit"
+            disabled={loading}
+            className="w-full py-3 bg-blue-600 text-white rounded-md hover:bg-blue-700 font-semibold transition-colors disabled:bg-blue-300"
+          >
+            {loading ? 'Saving Exam...' : 'Save Exam to Database'}
+          </button>
+        </div>
+      </form>
+    </div>
+  );
+}
+</file>
+
+<file path="app/exams/[id]/page.tsx">
+'use client';
+
+import { useEffect, useState } from 'react';
+import { supabase } from '@/lib/supabaseClient';
+import { useParams } from 'next/navigation';
+import { getAIFeedback } from '@/app/actions'; // <-- Importing our new AI action!
+
+interface Question {
+  id: string;
+  question_text: string;
+  options: string[];
+  correct_answer: string;
+}
+
+interface Exam {
+  id: string;
+  title: string;
+  description: string;
+}
+
+export default function TakeExamPage() {
+  const params = useParams();
+  const examId = params.id as string;
+
+  const [exam, setExam] = useState<Exam | null>(null);
+  const [questions, setQuestions] = useState<Question[]>([]);
+  const [answers, setAnswers] = useState<Record<string, string>>({});
+  const [loading, setLoading] = useState(true);
+  const [submitted, setSubmitted] = useState(false);
+  const [isGrading, setIsGrading] = useState(false);
+  const [score, setScore] = useState(0);
+  const [feedback, setFeedback] = useState("");
+
+  useEffect(() => {
+    async function fetchExamData() {
+      try {
+        const { data: examData } = await supabase.from('exams').select('*').eq('id', examId).single();
+        setExam(examData);
+
+        const { data: questionsData } = await supabase.from('questions').select('*').eq('exam_id', examId);
+        setQuestions(questionsData || []);
+      } catch (err) {
+        console.error(err);
+      } finally {
+        setLoading(false);
+      }
+    }
+    if (examId) fetchExamData();
+  }, [examId]);
+
+  const handleOptionSelect = (questionId: string, selectedOption: string) => {
+    setAnswers((prev) => ({ ...prev, [questionId]: selectedOption }));
+  };
+
+  const handleSubmit = async () => {
+    setIsGrading(true); // Start the loading animation
+    
+    let currentScore = 0;
+    let wrongAnswersContext = "";
+    
+    // Grade the exam and collect wrong answers for the AI
+    questions.forEach((q) => {
+      if (answers[q.id] === q.correct_answer) {
+        currentScore += 1;
+      } else {
+        wrongAnswersContext += `Question: "${q.question_text}" (They guessed: ${answers[q.id]}). `;
+      }
+    });
+
+    const finalScore = (currentScore / questions.length) * 100;
+    setScore(finalScore);
+
+    // 🤖 CALL THE AI! 🤖
+    const aiMessage = await getAIFeedback(currentScore, questions.length, wrongAnswersContext);
+    setFeedback(aiMessage);
+
+    // Save result AND AI feedback to the database
+    try {
+      await supabase.from('submissions').insert([
+        { exam_id: examId, score: finalScore, ai_feedback: aiMessage }
+      ]);
+    } catch (err) {
+      console.error(err);
+    }
+
+    setIsGrading(false);
+    setSubmitted(true);
+  };
+
+  if (loading) return <div className="p-10 text-center">Loading exam...</div>;
+  if (!exam) return <div className="p-10 text-center text-red-600">Exam not found.</div>;
+
+  return (
+    <div className="max-w-3xl mx-auto p-6 mt-10 bg-white shadow-lg rounded-lg border border-gray-100">
+      <h1 className="text-3xl font-bold mb-2 text-blue-600">{exam.title}</h1>
+      <p className="text-gray-600 mb-8 pb-4 border-b border-gray-200">{exam.description}</p>
+
+      {isGrading ? (
+        <div className="p-12 text-center">
+          <div className="text-4xl mb-4 animate-bounce">🤖</div>
+          <h2 className="text-2xl font-bold text-gray-800 animate-pulse">AI is grading your exam...</h2>
+        </div>
+      ) : submitted ? (
+        <div className="space-y-6">
+          <div className="p-8 bg-green-50 border border-green-200 rounded-lg text-center shadow-inner">
+            <h2 className="text-3xl font-bold text-green-700 mb-3">Exam Completed!</h2>
+            <p className="text-xl text-green-900">Your Score: <span className="font-black">{score.toFixed(1)}%</span></p>
+          </div>
+          
+          <div className="p-6 bg-blue-50 border border-blue-200 rounded-lg">
+            <h3 className="font-bold text-blue-800 mb-2 flex items-center gap-2">
+              <span>✨</span> AI Teacher Feedback
+            </h3>
+            <p className="text-blue-900 leading-relaxed">{feedback}</p>
+          </div>
+        </div>
+      ) : (
+        <div className="space-y-8">
+          {questions.map((q, index) => (
+            <div key={q.id} className="p-6 border border-gray-200 rounded-lg bg-gray-50 shadow-sm">
+              <h3 className="font-semibold text-lg text-gray-800 mb-4">{index + 1}. {q.question_text}</h3>
+              <div className="space-y-3">
+                {q.options.map((opt, i) => (
+                  <label key={i} className="flex items-center space-x-3 cursor-pointer p-3 bg-white border border-gray-200 rounded-md hover:bg-blue-50 transition-colors">
+                    <input
+                      type="radio"
+                      name={`question-${q.id}`}
+                      value={opt}
+                      onChange={() => handleOptionSelect(q.id, opt)}
+                      className="h-5 w-5 text-blue-600"
+                    />
+                    <span className="text-gray-700 font-medium">{opt}</span>
+                  </label>
+                ))}
+              </div>
+            </div>
+          ))}
+          
+          <button
+            onClick={handleSubmit}
+            disabled={Object.keys(answers).length < questions.length}
+            className="w-full py-4 bg-blue-600 text-white rounded-md hover:bg-blue-700 text-lg font-bold shadow-md transition-all disabled:bg-gray-400"
+          >
+            Submit Exam
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+</file>
+
+<file path="app/exams/simulation/page.tsx">
+"use client";
+
+import { useEffect, useState } from "react";
+import { supabase } from "@/lib/supabaseClient";
+
+interface ExamQuestion {
+  id: string;
+  question_text: string;
+  question_type: "multiple_choice" | "open";
+  options?: string[]; // עבור שאלות אמריקאיות
+  solution_text?: string;
+}
+
+interface ImageGradeResult {
+  isCorrect: boolean;
+  score: number;
+  transcribedText: string;
+  feedback: string;
+}
+
+export default function ExamSimulationPage() {
+  const [questions, setQuestions] = useState<ExamQuestion[]>([]);
+  const [courseId, setCourseId] = useState<string | null>(null);
+  const [selectedImage, setSelectedImage] = useState<Record<string, File>>({});
+  const [gradingState, setGradingState] = useState<Record<string, boolean>>({});
+  const [gradeResults, setGradeResults] = useState<Record<string, ImageGradeResult>>({});
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    async function initExam() {
+      const { data: courses } = await supabase.from("courses").select("id").limit(1);
+      if (!courses || courses.length === 0) {
+        setLoading(false);
+        return;
+      }
+      const cId = courses[0].id;
+      setCourseId(cId);
+
+      const { data: qData } = await supabase.from("exam_questions").select("*");
+      if (qData) {
+        setQuestions(
+          qData.map((q) => ({
+            id: q.id,
+            question_text: q.question_text,
+            question_type: q.options ? "multiple_choice" : "open",
+            options: q.options || [],
+            solution_text: q.solution_text,
+          }))
+        );
+      }
+      setLoading(false);
+    }
+    initExam();
+  }, []);
+
+  const handleFileChange = (questionId: string, file: File | null) => {
+    if (file) {
+      setSelectedImage((prev) => ({ ...prev, [questionId]: file }));
+    }
+  };
+
+  const submitHandwrittenSolution = async (questionId: string) => {
+    const file = selectedImage[questionId];
+    if (!file || !courseId) return;
+
+    setGradingState((prev) => ({ ...prev, [questionId]: true }));
+
+    const formData = new FormData();
+    formData.append("questionId", questionId);
+    formData.append("courseId", courseId);
+    formData.append("file", file);
+
+    try {
+      const res = await fetch("/api/exam/grade-image", { method: "POST", body: formData });
+      const data = await res.json();
+      if (data.success) {
+        setGradeResults((prev) => ({ ...prev, [questionId]: data }));
+      }
+    } catch {
+      alert("שגיאה בחיבור למנוע בדיקת התמונות.");
+    } finally {
+      setGradingState((prev) => ({ ...prev, [questionId]: false }));
+    }
+  };
+
+  if (loading) return <div className="p-8 text-center dir-rtl" dir="rtl">מכין את סימולציית המבחן...</div>;
+
+  return (
+    <div className="max-w-4xl mx-auto p-6 dir-rtl space-y-6" dir="rtl">
+      <div className="bg-amber-50 border border-amber-200 p-4 rounded-xl flex justify-between items-center">
+        <div>
+          <h1 className="text-xl font-bold text-amber-900">📝 סימולציית מבחן בזמן אמת</h1>
+          <p className="text-xs text-amber-800 mt-0.5">תרגול במבנה המבחן המלא. פתרונות פתוחים ניתן לצלם ולהעלות לבדיקת AI.</p>
+        </div>
+        <div className="bg-amber-600 text-white font-mono text-sm font-bold px-3 py-1.5 rounded-lg shadow">
+          ⏱️ 02:00:00
+        </div>
+      </div>
+
+      <div className="space-y-6">
+        {questions.map((q, idx) => (
+          <div key={q.id} className="bg-white p-5 rounded-xl border shadow-sm space-y-4">
+            <div className="flex justify-between items-start border-b pb-2">
+              <span className="font-bold text-sm text-gray-800">שאלה {idx + 1}</span>
+              <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-gray-100 text-gray-600">
+                {q.question_type === "multiple_choice" ? "אמריקאית" : "שאלה פתוחה"}
+              </span>
+            </div>
+
+            <p className="text-sm font-medium text-gray-900">{q.question_text}</p>
+
+            {/* שאלות רב בחירתיות */}
+            {q.question_type === "multiple_choice" && (
+              <div className="space-y-2 pt-2">
+                {q.options?.map((opt, oIdx) => (
+                  <label key={oIdx} className="flex items-center gap-2 p-2 rounded-lg border hover:bg-gray-50 text-xs cursor-pointer">
+                    <input type="radio" name={`q-${q.id}`} className="text-blue-600" />
+                    <span>{opt}</span>
+                  </label>
+                ))}
+              </div>
+            )}
+
+            {/* שאלות פתוחות - העלאת תמונה */}
+            {q.question_type === "open" && (
+              <div className="bg-gray-50 p-4 rounded-lg border border-dashed space-y-3">
+                <span className="text-xs font-bold text-gray-700 block">📷 העלאת צילום פתרון בכתב יד:</span>
+                <input
+                  type="file"
+                  accept="image/*"
+                  onChange={(e) => handleFileChange(q.id, e.target.files?.[0] || null)}
+                  className="block w-full text-xs text-gray-500 file:mr-4 file:py-1.5 file:px-3 file:rounded-md file:border-0 file:text-xs file:font-semibold file:bg-blue-50 file:text-blue-700"
+                />
+
+                {selectedImage[q.id] && (
+                  <button
+                    onClick={() => submitHandwrittenSolution(q.id)}
+                    disabled={gradingState[q.id]}
+                    className="bg-blue-600 hover:bg-blue-700 disabled:bg-gray-300 text-white font-bold text-xs py-2 px-4 rounded-lg transition"
+                  >
+                    {gradingState[q.id] ? "מפענח ובודק את התמונה..." : "בדוק פתרון מתוך התמונה"}
+                  </button>
+                )}
+
+                {/* תצוגת משוב והערכת AI למבחן */}
+                {gradeResults[q.id] && (
+                  <div className={`mt-3 p-4 rounded-lg border text-xs space-y-2 ${gradeResults[q.id].isCorrect ? "bg-green-50 border-green-200" : "bg-red-50 border-red-200"}`}>
+                    <div className="flex justify-between font-bold">
+                      <span>ציון לתשובה: {gradeResults[q.id].score}/100</span>
+                      <span>{gradeResults[q.id].isCorrect ? "🟢 תשובה נכונה" : "🔴 טעות בפתרון"}</span>
+                    </div>
+                    <p className="text-gray-700"><strong>טקסט שפוענח מכתב היד:</strong> {gradeResults[q.id].transcribedText}</p>
+                    <p className="text-gray-800"><strong>משוב מנוע הבדיקה:</strong> {gradeResults[q.id].feedback}</p>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+</file>
+
+<file path="app/login/page.tsx">
+'use client';
+
+import { useState } from 'react';
+import { supabase } from '@/lib/supabaseClient';
+import { useRouter } from 'next/navigation';
+
+export default function LoginPage() {
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [error, setError] = useState('');
+  const [loading, setLoading] = useState(false);
+  const router = useRouter();
+
+  const handleSignUp = async () => {
+    setLoading(true);
+    setError('');
+    const { error } = await supabase.auth.signUp({ email, password });
+    
+    if (error) {
+      setError(error.message);
+    } else {
+      alert('Sign up successful! You can now log in.');
+    }
+    setLoading(false);
+  };
+
+  const handleLogin = async () => {
+    setLoading(true);
+    setError('');
+    const { error } = await supabase.auth.signInWithPassword({ email, password });
+    
+    if (error) {
+      setError(error.message);
+    } else {
+      router.push('/dashboard'); // Send them to the dashboard after logging in!
+    }
+    setLoading(false);
+  };
+
+  return (
+    <div className="max-w-md mx-auto p-8 mt-20 bg-white shadow-lg rounded-lg border border-gray-100">
+      <h1 className="text-3xl font-bold mb-6 text-center text-blue-600">Welcome Back</h1>
+      
+      {error && <p className="text-red-500 bg-red-50 p-3 rounded mb-4 text-sm">{error}</p>}
+
+      <div className="space-y-4">
+        <div>
+          <label className="block text-gray-700 font-medium mb-2">Email</label>
+          <input
+            type="email"
+            value={email}
+            onChange={(e) => setEmail(e.target.value)}
+            className="w-full p-3 border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-500"
+            placeholder="teacher@school.com"
+          />
+        </div>
+
+        <div>
+          <label className="block text-gray-700 font-medium mb-2">Password</label>
+          <input
+            type="password"
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+            className="w-full p-3 border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-500"
+            placeholder="••••••••"
+          />
+        </div>
+
+        <div className="flex gap-4 pt-4">
+          <button
+            onClick={handleLogin}
+            disabled={loading || !email || !password}
+            className="flex-1 bg-blue-600 text-white p-3 rounded-md font-bold hover:bg-blue-700 disabled:bg-gray-400 transition-colors"
+          >
+            {loading ? 'Processing...' : 'Log In'}
+          </button>
+          <button
+            onClick={handleSignUp}
+            disabled={loading || !email || !password}
+            className="flex-1 bg-white text-blue-600 border-2 border-blue-600 p-3 rounded-md font-bold hover:bg-blue-50 disabled:border-gray-400 disabled:text-gray-400 transition-colors"
+          >
+            Sign Up
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+</file>
+
+<file path="app/plan/page.tsx">
+"use client";
+
+import { useState } from "react";
+import { supabase } from "@/lib/supabaseClient";
+
+interface DailyTask {
+  day: number;
+  dateStr: string;
+  focusTopics: string[];
+  recallConceptsCount: number;
+  trapQuestionsCount: number;
+  estimatedHours: number;
+}
+
+export default function PlanPage() {
+  const [examDate, setExamDate] = useState("");
+  const [dailyHours, setDailyHours] = useState(4);
+  const [schedule, setSchedule] = useState<DailyTask[]>([]);
+  const [loading, setLoading] = useState(false);
+
+  async function generatePlan() {
+    if (!examDate) {
+      alert("נא לבחור תאריך בחינה");
+      return;
+    }
+
+    setLoading(true);
+
+    // 1. שליפת מושגים הדורשים חזרה (אדום/צהוב) ושאלות מלכודת
+    const [{ data: concepts }, { data: traps }] = await Promise.all([
+      supabase.from("course_concepts").select("*").in("status_color", ["red", "yellow"]),
+      supabase.from("exam_questions").select("*").eq("is_trap", true),
+    ]);
+
+    const activeConcepts = concepts || [];
+    const activeTraps = traps || [];
+
+    // 2. חישוב הימים שנשארו עד הבחינה
+    const today = new Date();
+    const target = new Date(examDate);
+    const diffTime = Math.max(target.getTime() - today.getTime(), 0);
+    const totalDays = Math.max(Math.ceil(diffTime / (1000 * 60 * 60 * 24)), 1);
+
+    // 3. חלוקת העומס על פני הימים
+    const conceptsPerDay = Math.ceil(activeConcepts.length / totalDays);
+    const trapsPerDay = Math.ceil(activeTraps.length / totalDays);
+
+    const generatedSchedule: DailyTask[] = [];
+
+    for (let i = 0; i < totalDays; i++) {
+      const currentDate = new Date();
+      currentDate.setDate(today.getDate() + i);
+
+      const dayConcepts = activeConcepts.slice(i * conceptsPerDay, (i + 1) * conceptsPerDay);
+      const dayTraps = activeTraps.slice(i * trapsPerDay, (i + 1) * trapsPerDay);
+
+      const topicNames = Array.from(
+        new Set(dayConcepts.map((c) => c.concept_name))
+      ).slice(0, 3);
+
+      generatedSchedule.push({
+        day: i + 1,
+        dateStr: currentDate.toLocaleDateString("he-IL", {
+          weekday: "short",
+          month: "numeric",
+          day: "numeric",
+        }),
+        focusTopics: topicNames.length > 0 ? topicNames : ["חזרה כללית וסימולציות"],
+        recallConceptsCount: dayConcepts.length,
+        trapQuestionsCount: dayTraps.length,
+        estimatedHours: Math.min(dailyHours, Math.max(2, dayConcepts.length * 0.5)),
+      });
+    }
+
+    setSchedule(generatedSchedule);
+    setLoading(false);
+  }
+
+  return (
+    <div className="max-w-4xl mx-auto p-6 dir-rtl" dir="rtl">
+      <h1 className="text-2xl font-bold mb-2">מחולל לוח הזמנים החכם ללמידה</h1>
+      <p className="text-sm text-gray-600 mb-6">
+        בניית לו"ז אופטימלי המבוסס על תאריך המבחן, רמת השליטה במושגים (Active Recall) ושאלות מלכודת.
+      </p>
+
+      {/* טופס אילוצים */}
+      <div className="bg-white p-6 rounded-lg border shadow-sm mb-8 grid grid-cols-1 md:grid-cols-3 gap-4 items-end">
+        <div>
+          <label className="block text-xs font-bold text-gray-700 mb-1">תאריך הבחינה:</label>
+          <input
+            type="date"
+            value={examDate}
+            onChange={(e) => setExamDate(e.target.value)}
+            className="w-full border rounded p-2 text-sm"
+          />
+        </div>
+
+        <div>
+          <label className="block text-xs font-bold text-gray-700 mb-1">שעות לימוד זמינות ביום:</label>
+          <input
+            type="number"
+            min="1"
+            max="12"
+            value={dailyHours}
+            onChange={(e) => setDailyHours(Number(e.target.value))}
+            className="w-full border rounded p-2 text-sm"
+          />
+        </div>
+
+        <button
+          onClick={generatePlan}
+          disabled={loading}
+          className="bg-blue-600 text-white py-2 px-4 rounded font-semibold text-sm hover:bg-blue-700 disabled:opacity-50"
+        >
+          {loading ? "מחשב תוכנית..." : "צור תוכנית לימודית 📅"}
+        </button>
+      </div>
+
+      {/* הצגת לוח הזמנים */}
+      {schedule.length > 0 && (
+        <div className="space-y-4">
+          <h2 className="text-lg font-bold">תוכנית עבודה יומית מוצעת</h2>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            {schedule.map((task) => (
+              <div key={task.day} className="bg-white p-5 rounded-lg border shadow-sm space-y-3">
+                <div className="flex justify-between items-center border-b pb-2">
+                  <span className="font-bold text-blue-900">יום {task.day} ({task.dateStr})</span>
+                  <span className="text-xs bg-gray-100 text-gray-700 px-2 py-0.5 rounded">
+                    ⏱️ כ-{task.estimatedHours} שעות
+                  </span>
+                </div>
+
+                <div>
+                  <h4 className="text-xs font-bold text-gray-500">מיקוד עיקרי:</h4>
+                  <p className="text-sm font-semibold text-gray-800">
+                    {task.focusTopics.join(", ")}
+                  </p>
+                </div>
+
+                <div className="flex gap-4 text-xs pt-1 border-t text-gray-600">
+                  <span>🎴 {task.recallConceptsCount} מושגי Active Recall</span>
+                  <span>🔥 {task.trapQuestionsCount} שאלות פינה/מלכודת</span>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+</file>
+
+<file path="app/actions.ts">
+'use server';
+
+import { GoogleGenerativeAI } from '@google/generative-ai';
+
+export async function getAIFeedback(score: number, total: number, wrongAnswers: string) {
+  // 'use server' guarantees this runs securely on your backend so your API key is safe!
+  
+  try {
+    const apiKey = process.env.GEMINI_API_KEY;
+    if (!apiKey) return "AI is currently taking a nap. Keep up the good work!";
+
+    // Initialize the Gemini AI
+    const genAI = new GoogleGenerativeAI(apiKey);
+    const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+
+    // Give the AI its instructions (the prompt)
+    let prompt = "";
+    if (score === total) {
+      prompt = "A student just got a perfect score on their exam! Write a short, fun 2-sentence congratulatory message.";
+    } else {
+      prompt = `A student got ${score} out of ${total} correct on their exam. They got these questions wrong: ${wrongAnswers}. Write a short, encouraging 2-3 sentence feedback message telling them what topics to review. Be highly supportive!`;
+    }
+
+    // Ask Gemini to generate the text
+    const result = await model.generateContent(prompt);
+    return result.response.text();
+    
+  } catch (error) {
+    console.error("AI Error:", error);
+    return "Great effort! Keep studying and you will do even better next time.";
+  }
+}
+</file>
+
+<file path="app/globals.css">
+@import "tailwindcss";
+
+:root {
+  --background: #ffffff;
+  --foreground: #171717;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --background: #0a0a0a;
+    --foreground: #ededed;
+  }
+}
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+  font-family: Arial, Helvetica, sans-serif;
+}
+</file>
+
+<file path="lib/services/analyticsService.ts">
+import { supabase } from "@/lib/supabaseClient";
+
+export interface ExamHeader {
+  id: string;
+  year: number;
+  term: string;
+}
+
+export interface TopicMatrixRow {
+  topicId: string;
+  topicTitle: string;
+  appearancePercentage: number;
+  isMandatory: boolean; // נושא שמופיע כמעט בכל המבחנים (>= 80%)
+  totalQuestionsCount: number;
+  examQuestionsMap: Record<string, number[]>; // examId -> [questionNumbers]
+}
+
+export interface MatrixAnalyticsResult {
+  exams: ExamHeader[];
+  matrixRows: TopicMatrixRow[];
+}
+
+export async function getCourseMatrixAndAnalytics(courseId: string): Promise<MatrixAnalyticsResult> {
+  // 1. שליפת כל מועדי המבחנים של הקורס
+  const { data: examsData, error: examsErr } = await supabase
+    .from("exams")
+    .select("id, year, term")
+    .eq("course_id", courseId)
+    .order("year", { ascending: false });
+
+  if (examsErr) throw examsErr;
+
+  const exams: ExamHeader[] = (examsData || []).map((e) => ({
+    id: e.id,
+    year: e.year,
+    term: e.term,
+  }));
+
+  // 2. שליפת הנושאים והשאלות המסווגות
+  const [{ data: topics }, { data: questions }] = await Promise.all([
+    supabase.from("course_topics").select("id, title").eq("course_id", courseId),
+    supabase.from("exam_questions").select("id, topic_id, exam_id, question_number").eq("course_id", courseId),
+  ]);
+
+  const totalExamsCount = exams.length;
+
+  // 3. בניית המטריצה וחישוב סטטיסטיקת מועדים
+  const matrixRows: TopicMatrixRow[] = (topics || []).map((topic) => {
+    const examQuestionsMap: Record<string, number[]> = {};
+    const examsWithTopicSet = new Set<string>();
+    let totalQuestionsCount = 0;
+
+    (questions || []).forEach((q) => {
+      if (q.topic_id === topic.id && q.exam_id) {
+        if (!examQuestionsMap[q.exam_id]) {
+          examQuestionsMap[q.exam_id] = [];
+        }
+        examQuestionsMap[q.exam_id].push(q.question_number);
+        examsWithTopicSet.add(q.exam_id);
+        totalQuestionsCount++;
+      }
+    });
+
+    const examsAppearedCount = examsWithTopicSet.size;
+    const appearancePercentage = totalExamsCount > 0 
+      ? Number(((examsAppearedCount / totalExamsCount) * 100).toFixed(1))
+      : 0;
+
+    return {
+      topicId: topic.id,
+      topicTitle: topic.title,
+      appearancePercentage,
+      isMandatory: appearancePercentage >= 80, // נושא חובה קבוע
+      totalQuestionsCount,
+      examQuestionsMap,
+    };
+  });
+
+  // מיון לפי שכיחות (נושאי החובה בראש)
+  matrixRows.sort((a, b) => b.appearancePercentage - a.appearancePercentage);
+
+  return { exams, matrixRows };
+}
+</file>
+
+<file path="lib/services/ingestionService.ts">
+import { supabase } from '../supabaseClient';
+
+export interface UploadBatchPayload {
+  userId: string;
+  courseId: string;
+  syllabus: File;
+  textbook: File;
+  exams: {
+    file: File;
+    hasSolutions: boolean;
+    currentLecturer: boolean;
+  }[];
+}
+
+export interface ValidationResult {
+  valid: boolean;
+  errors: string[];
+}
+
+export function validateIngestionBatch(examsCount: number, syllabusPresent: boolean, textbookPresent: boolean): ValidationResult {
+  const errors: string[] = [];
+
+  if (!syllabusPresent) {
+    errors.push("A course syllabus is required.");
+  }
+  if (!textbookPresent) {
+    errors.push("A course textbook is required.");
+  }
+  if (examsCount < 20) {
+    errors.push(`A minimum of 20 past exams is required. Currently uploaded: ${examsCount}.`);
+  }
+
+  return {
+    valid: errors.length === 0,
+    errors
+  };
+}
+
+export async function uploadCourseBatch(payload: UploadBatchPayload) {
+  const { userId, courseId, syllabus, textbook, exams } = payload;
+
+  const validation = validateIngestionBatch(exams.length, !!syllabus, !!textbook);
+  if (!validation.valid) {
+    throw new Error(`Ingestion validation failed: ${validation.errors.join(" ")}`);
+  }
+
+  const uploadedRecords = [];
+
+  const processUpload = async (file: File, fileType: 'syllabus' | 'textbook' | 'exam', hasSolutions = false, currentLecturer = true) => {
+    const cleanFileName = `${Date.now()}_${file.name.replace(/[^a-zA-Z0-9.-]/g, '_')}`;
+    const storagePath = `${userId}/${courseId}/${fileType}s/${cleanFileName}`;
+
+    const { error: storageError } = await supabase.storage
+      .from('course-materials')
+      .upload(storagePath, file, { cacheControl: '3600', upsert: false });
+
+    if (storageError) throw new Error(`Storage upload failed for ${file.name}: ${storageError.message}`);
+
+    const { data: dbData, error: dbError } = await supabase
+      .from('course_files')
+      .insert({
+        user_id: userId,
+        course_id: courseId,
+        file_type: fileType,
+        file_name: file.name,
+        storage_path: storagePath,
+        file_size_bytes: file.size,
+        has_solutions: hasSolutions,
+        current_lecturer: currentLecturer,
+        ingestion_status: 'pending'
+      })
+      .select()
+      .single();
+
+    if (dbError) throw new Error(`Database record creation failed for ${file.name}: ${dbError.message}`);
+
+    return dbData;
+  };
+
+  uploadedRecords.push(await processUpload(syllabus, 'syllabus'));
+  uploadedRecords.push(await processUpload(textbook, 'textbook'));
+
+  for (const examItem of exams) {
+    const record = await processUpload(examItem.file, 'exam', examItem.hasSolutions, examItem.currentLecturer);
+    uploadedRecords.push(record);
+  }
+
+  return uploadedRecords;
+}
+</file>
+
+<file path="lib/services/plannerService.ts">
+export interface PlannerParams {
+  knowledgeMap: any;
+  examDate: string;
+  studyHoursPerWeek: number;
+  targetGrade: string;
+}
+
+export function generateStudyPlan(params: PlannerParams) {
+  const { knowledgeMap, examDate, studyHoursPerWeek, targetGrade } = params;
+
+  // 1. Calculate time available
+  const today = new Date();
+  const exam = new Date(examDate);
+  const daysUntilExam = Math.max(1, Math.ceil((exam.getTime() - today.getTime()) / (1000 * 60 * 60 * 24)));
+  const weeksUntilExam = daysUntilExam / 7;
+  const totalAvailableHours = Math.floor(weeksUntilExam * studyHoursPerWeek);
+
+  // 2. Calculate time required based on Knowledge Map complexity
+  let totalConcepts = 0;
+  let allConcepts: { topicName: string; conceptName: string }[] = [];
+
+  if (knowledgeMap?.topics) {
+    knowledgeMap.topics.forEach((topic: any) => {
+      if (topic.concepts) {
+        topic.concepts.forEach((concept: any) => {
+          totalConcepts++;
+          allConcepts.push({ topicName: topic.name, conceptName: concept.name });
+        });
+      }
+    });
+  }
+
+  // Base requirement: ~2 hours per concept. 
+  // Multiplier adjusts based on the desired depth of mastery (Target Grade).
+  const gradeMultipliers: Record<string, number> = {
+    'Pass': 1.0,
+    'B': 1.2,
+    'A': 1.5,
+    'A+': 2.0
+  };
+  const multiplier = gradeMultipliers[targetGrade] || 1.2;
+  const totalRequiredHours = Math.ceil(totalConcepts * 2 * multiplier);
+
+  // 3. Determine Feasibility
+  const isFeasible = totalAvailableHours >= totalRequiredHours;
+
+  // 4. Generate a simplified schedule distribution (Chunking concepts into weeks)
+  const scheduleData: any[] = [];
+  const conceptsPerWeek = Math.ceil(totalConcepts / Math.max(1, Math.floor(weeksUntilExam)));
+  
+  let currentConceptIndex = 0;
+  for (let w = 1; w <= Math.floor(weeksUntilExam); w++) {
+    const weeklyConcepts = [];
+    for (let i = 0; i < conceptsPerWeek; i++) {
+      if (currentConceptIndex < allConcepts.length) {
+        weeklyConcepts.push(allConcepts[currentConceptIndex]);
+        currentConceptIndex++;
+      }
+    }
+    
+    if (weeklyConcepts.length > 0) {
+      scheduleData.push({
+        week: w,
+        focus: weeklyConcepts
+      });
+    }
+  }
+
+  return {
+    isFeasible,
+    totalRequiredHours,
+    totalAvailableHours,
+    daysUntilExam,
+    scheduleData
+  };
+}
+</file>
+
+<file path="lib/supabaseClient.ts">
+import { createClient } from '@supabase/supabase-js';
+
+const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL!;
+const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!;
+
+// Initialize and export the Supabase client instance
+export const supabase = createClient(supabaseUrl, supabaseAnonKey);
+</file>
+
+<file path="public/file.svg">
+<svg fill="none" viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg"><path d="M14.5 13.5V5.41a1 1 0 0 0-.3-.7L9.8.29A1 1 0 0 0 9.08 0H1.5v13.5A2.5 2.5 0 0 0 4 16h8a2.5 2.5 0 0 0 2.5-2.5m-1.5 0v-7H8v-5H3v12a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1M9.5 5V2.12L12.38 5zM5.13 5h-.62v1.25h2.12V5zm-.62 3h7.12v1.25H4.5zm.62 3h-.62v1.25h7.12V11z" clip-rule="evenodd" fill="#666" fill-rule="evenodd"/></svg>
+</file>
+
+<file path="public/globe.svg">
+<svg fill="none" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><g clip-path="url(#a)"><path fill-rule="evenodd" clip-rule="evenodd" d="M10.27 14.1a6.5 6.5 0 0 0 3.67-3.45q-1.24.21-2.7.34-.31 1.83-.97 3.1M8 16A8 8 0 1 0 8 0a8 8 0 0 0 0 16m.48-1.52a7 7 0 0 1-.96 0H7.5a4 4 0 0 1-.84-1.32q-.38-.89-.63-2.08a40 40 0 0 0 3.92 0q-.25 1.2-.63 2.08a4 4 0 0 1-.84 1.31zm2.94-4.76q1.66-.15 2.95-.43a7 7 0 0 0 0-2.58q-1.3-.27-2.95-.43a18 18 0 0 1 0 3.44m-1.27-3.54a17 17 0 0 1 0 3.64 39 39 0 0 1-4.3 0 17 17 0 0 1 0-3.64 39 39 0 0 1 4.3 0m1.1-1.17q1.45.13 2.69.34a6.5 6.5 0 0 0-3.67-3.44q.65 1.26.98 3.1M8.48 1.5l.01.02q.41.37.84 1.31.38.89.63 2.08a40 40 0 0 0-3.92 0q.25-1.2.63-2.08a4 4 0 0 1 .85-1.32 7 7 0 0 1 .96 0m-2.75.4a6.5 6.5 0 0 0-3.67 3.44 29 29 0 0 1 2.7-.34q.31-1.83.97-3.1M4.58 6.28q-1.66.16-2.95.43a7 7 0 0 0 0 2.58q1.3.27 2.95.43a18 18 0 0 1 0-3.44m.17 4.71q-1.45-.12-2.69-.34a6.5 6.5 0 0 0 3.67 3.44q-.65-1.27-.98-3.1" fill="#666"/></g><defs><clipPath id="a"><path fill="#fff" d="M0 0h16v16H0z"/></clipPath></defs></svg>
+</file>
+
+<file path="public/next.svg">
+<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 394 80"><path fill="#000" d="M262 0h68.5v12.7h-27.2v66.6h-13.6V12.7H262V0ZM149 0v12.7H94v20.4h44.3v12.6H94v21h55v12.6H80.5V0h68.7zm34.3 0h-17.8l63.8 79.4h17.9l-32-39.7 32-39.6h-17.9l-23 28.6-23-28.6zm18.3 56.7-9-11-27.1 33.7h17.8l18.3-22.7z"/><path fill="#000" d="M81 79.3 17 0H0v79.3h13.6V17l50.2 62.3H81Zm252.6-.4c-1 0-1.8-.4-2.5-1s-1.1-1.6-1.1-2.6.3-1.8 1-2.5 1.6-1 2.6-1 1.8.3 2.5 1a3.4 3.4 0 0 1 .6 4.3 3.7 3.7 0 0 1-3 1.8zm23.2-33.5h6v23.3c0 2.1-.4 4-1.3 5.5a9.1 9.1 0 0 1-3.8 3.5c-1.6.8-3.5 1.3-5.7 1.3-2 0-3.7-.4-5.3-1s-2.8-1.8-3.7-3.2c-.9-1.3-1.4-3-1.4-5h6c.1.8.3 1.6.7 2.2s1 1.2 1.6 1.5c.7.4 1.5.5 2.4.5 1 0 1.8-.2 2.4-.6a4 4 0 0 0 1.6-1.8c.3-.8.5-1.8.5-3V45.5zm30.9 9.1a4.4 4.4 0 0 0-2-3.3 7.5 7.5 0 0 0-4.3-1.1c-1.3 0-2.4.2-3.3.5-.9.4-1.6 1-2 1.6a3.5 3.5 0 0 0-.3 4c.3.5.7.9 1.3 1.2l1.8 1 2 .5 3.2.8c1.3.3 2.5.7 3.7 1.2a13 13 0 0 1 3.2 1.8 8.1 8.1 0 0 1 3 6.5c0 2-.5 3.7-1.5 5.1a10 10 0 0 1-4.4 3.5c-1.8.8-4.1 1.2-6.8 1.2-2.6 0-4.9-.4-6.8-1.2-2-.8-3.4-2-4.5-3.5a10 10 0 0 1-1.7-5.6h6a5 5 0 0 0 3.5 4.6c1 .4 2.2.6 3.4.6 1.3 0 2.5-.2 3.5-.6 1-.4 1.8-1 2.4-1.7a4 4 0 0 0 .8-2.4c0-.9-.2-1.6-.7-2.2a11 11 0 0 0-2.1-1.4l-3.2-1-3.8-1c-2.8-.7-5-1.7-6.6-3.2a7.2 7.2 0 0 1-2.4-5.7 8 8 0 0 1 1.7-5 10 10 0 0 1 4.3-3.5c2-.8 4-1.2 6.4-1.2 2.3 0 4.4.4 6.2 1.2 1.8.8 3.2 2 4.3 3.4 1 1.4 1.5 3 1.5 5h-5.8z"/></svg>
+</file>
+
+<file path="public/vercel.svg">
+<svg fill="none" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1155 1000"><path d="m577.3 0 577.4 1000H0z" fill="#fff"/></svg>
+</file>
+
+<file path="public/window.svg">
+<svg fill="none" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><path fill-rule="evenodd" clip-rule="evenodd" d="M1.5 2.5h13v10a1 1 0 0 1-1 1h-11a1 1 0 0 1-1-1zM0 1h16v11.5a2.5 2.5 0 0 1-2.5 2.5h-11A2.5 2.5 0 0 1 0 12.5zm3.75 4.5a.75.75 0 1 0 0-1.5.75.75 0 0 0 0 1.5M7 4.75a.75.75 0 1 1-1.5 0 .75.75 0 0 1 1.5 0m1.75.75a.75.75 0 1 0 0-1.5.75.75 0 0 0 0 1.5" fill="#666"/></svg>
+</file>
+
+<file path="supabase/migrations/20260822_course_ingestion.sql">
+-- Create storage bucket for course materials
+INSERT INTO storage.buckets (id, name, public) 
+VALUES ('course-materials', 'course-materials', false)
+ON CONFLICT (id) DO NOTHING;
+
+-- Table to manage metadata for all uploaded course documents
+CREATE TABLE IF NOT EXISTS public.course_files (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
+    course_id UUID NOT NULL,
+    file_type TEXT NOT NULL CHECK (file_type IN ('syllabus', 'textbook', 'exam')),
+    file_name TEXT NOT NULL,
+    storage_path TEXT NOT NULL,
+    file_size_bytes BIGINT NOT NULL,
+    has_solutions BOOLEAN DEFAULT false,
+    current_lecturer BOOLEAN DEFAULT true,
+    ingestion_status TEXT NOT NULL DEFAULT 'pending' CHECK (ingestion_status IN ('pending', 'processing', 'completed', 'failed')),
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- RLS Policies
+ALTER TABLE public.course_files ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY "Users can upload their own course files" 
+ON public.course_files FOR INSERT 
+WITH CHECK (auth.uid() = user_id);
+
+CREATE POLICY "Users can view their own course files" 
+ON public.course_files FOR SELECT 
+USING (auth.uid() = user_id);
+
+CREATE POLICY "Users can delete their own course files" 
+ON public.course_files FOR DELETE 
+USING (auth.uid() = user_id);
+
+-- Storage RLS Policies
+CREATE POLICY "Authenticated users can upload course assets"
+ON storage.objects FOR INSERT TO authenticated
+WITH CHECK (bucket_id = 'course-materials' AND (storage.foldername(name))[1] = auth.uid()::text);
+
+CREATE POLICY "Users can read their own course assets"
+ON storage.objects FOR SELECT TO authenticated
+USING (bucket_id = 'course-materials' AND (storage.foldername(name))[1] = auth.uid()::text);
+</file>
+
+<file path=".gitignore">
+# See https://help.github.com/articles/ignoring-files/ for more about ignoring files.
+
+# dependencies
+/node_modules
+/.pnp
+.pnp.*
+.yarn/*
+!.yarn/patches
+!.yarn/plugins
+!.yarn/releases
+!.yarn/versions
+
+# testing
+/coverage
+
+# next.js
+/.next/
+/out/
+
+# production
+/build
+
+# misc
+.DS_Store
+*.pem
+
+# debug
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+# env files (can opt-in for committing if needed)
+.env*
+
+# vercel
+.vercel
+
+# typescript
+*.tsbuildinfo
+next-env.d.ts
+</file>
+
+<file path="AGENTS.md">
+<!-- BEGIN:nextjs-agent-rules -->
+
+# This is NOT the Next.js you know
+
+This version has breaking changes — APIs, conventions, and file structure may all differ from your training data. Read the relevant guide in `node_modules/next/dist/docs/` (resolved from this file's directory; in monorepos the `next` package may not be visible from the repo root) before writing any code. Heed deprecation notices.
+
+This block is written and re-added by `next dev` — verify at `node_modules/next/dist/server/lib/generate-agent-files.js`. Removing it from a diff only re-creates the uncommitted change; committing it with your work keeps the tree clean.
+
+<!-- END:nextjs-agent-rules -->
+</file>
+
+<file path="CLAUDE.md">
+@AGENTS.md
+</file>
+
+<file path="eslint.config.mjs">
+import { defineConfig, globalIgnores } from "eslint/config";
+import nextVitals from "eslint-config-next/core-web-vitals";
+import nextTs from "eslint-config-next/typescript";
+
+const eslintConfig = defineConfig([
+  ...nextVitals,
+  ...nextTs,
+  // Override default ignores of eslint-config-next.
+  globalIgnores([
+    // Default ignores of eslint-config-next:
+    ".next/**",
+    "out/**",
+    "build/**",
+    "next-env.d.ts",
+  ]),
+]);
+
+export default eslintConfig;
+</file>
+
+<file path="next.config.ts">
+import type { NextConfig } from "next";
+
+const nextConfig: NextConfig = {
+  /* config options here */
+};
+
+export default nextConfig;
+</file>
+
+<file path="postcss.config.mjs">
+const config = {
+  plugins: {
+    "@tailwindcss/postcss": {},
+  },
+};
+
+export default config;
+</file>
+
+<file path="README.md">
+This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+
+## Getting Started
+
+First, run the development server:
+
+```bash
+npm run dev
+# or
+yarn dev
+# or
+pnpm dev
+# or
+bun dev
+```
+
+Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+
+You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+
+This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+
+## Learn More
+
+To learn more about Next.js, take a look at the following resources:
+
+- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
+- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+
+You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+
+## Deploy on Vercel
+
+The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+
+Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+</file>
+
+<file path="tsconfig.json">
+{
+  "compilerOptions": {
+    "target": "ES2017",
+    "lib": ["dom", "dom.iterable", "esnext"],
+    "allowJs": true,
+    "skipLibCheck": true,
+    "strict": true,
+    "noEmit": true,
+    "esModuleInterop": true,
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "jsx": "react-jsx",
+    "incremental": true,
+    "plugins": [
+      {
+        "name": "next"
+      }
+    ],
+    "paths": {
+      "@/*": ["./*"]
+    }
+  },
+  "include": [
+    "next-env.d.ts",
+    "**/*.ts",
+    "**/*.tsx",
+    ".next/types/**/*.ts",
+    ".next/dev/types/**/*.ts",
+    "**/*.mts"
+  ],
+  "exclude": ["node_modules"]
+}
+</file>
+
+<file path="app/api/ai/parse-exam/route.ts">
+import { NextResponse } from "next/server";
+import { supabase } from "@/lib/supabaseClient";
+import { extractExamQuestions } from "@/lib/services/geminiService";
+
+export async function POST(request: Request) {
+  try {
+    const { courseId } = await request.json();
+    if (!courseId) {
+      return NextResponse.json({ error: "Missing courseId" }, { status: 400 });
+    }
+
+    const { data: topics } = await supabase
+      .from("course_topics")
+      .select("id, topic_name")
+      .eq("course_id", courseId);
+
+    const { data: examFiles } = await supabase
+      .from("course_files")
+      .select("*")
+      .eq("course_id", courseId)
+      .eq("file_type", "exam");
+
+    if (!examFiles || examFiles.length === 0) {
+      return NextResponse.json({ error: "No exam files found" }, { status: 404 });
+    }
+
+    const insertedQuestions = [];
+
+    for (const exam of examFiles) {
+      const { data: blob, error: downloadError } = await supabase.storage
+        .from("course-materials")
+        .download(exam.file_path);
+
+      if (downloadError || !blob) continue;
+
+      const arrayBuffer = await blob.arrayBuffer();
+      const buffer = Buffer.from(arrayBuffer);
+
+      const parsedQuestions = await extractExamQuestions(buffer, "application/pdf");
+
+      const questionsToInsert = parsedQuestions.map((q: any, index: number) => {
+        const matchedTopic = topics?.find(
+          (t) => t.topic_name.toLowerCase() === q.topic?.toLowerCase()
+        );
+
+        return {
+          course_id: courseId,
+          exam_file_id: exam.id,
+          topic_id: matchedTopic ? matchedTopic.id : topics?.[0]?.id || null,
+          question_number: index + 1,
+          points: 0,
+          question_text: q.question_text || "",
+          solution_text: q.solution_text || null,
+          is_trap: q.is_trap || false,
+          guidance_notes: q.guidance_notes || "",
+        };
+      });
+
+      if (questionsToInsert.length > 0) {
+        const { data, error: insertError } = await supabase
+          .from("exam_questions")
+          .insert(questionsToInsert)
+          .select();
+
+        if (!insertError && data) {
+          insertedQuestions.push(...data);
+        }
+      }
+    }
+
+    return NextResponse.json({
+      success: true,
+      questionsCount: insertedQuestions.length,
+    });
+  } catch (err: any) {
+    return NextResponse.json(
+      { error: err.message || "Failed to parse exams" },
+      { status: 500 }
+    );
+  }
+}
+</file>
+
+<file path="app/api/extract-topics/route.ts">
+import { NextResponse } from "next/server";
+import { supabase } from "@/lib/supabaseClient";
+import { generateCourseKnowledgeMap } from "@/lib/services/geminiService";
+
+export async function POST(request: Request) {
+  try {
+    const { courseId } = await request.json();
+    if (!courseId) {
+      return NextResponse.json({ error: "Missing courseId" }, { status: 400 });
+    }
+
+    const { data: files } = await supabase
+      .from("course_files")
+      .select("file_path")
+      .eq("course_id", courseId)
+      .eq("file_type", "syllabus")
+      .limit(1);
+
+    if (!files || files.length === 0) {
+      return NextResponse.json({ error: "Syllabus file not found" }, { status: 404 });
+    }
+
+    const { data: blob, error: downloadError } = await supabase.storage
+      .from("course-materials")
+      .download(files[0].file_path);
+
+    if (downloadError || !blob) {
+      throw new Error("Failed to download syllabus file");
+    }
+
+    const arrayBuffer = await blob.arrayBuffer();
+    const buffer = Buffer.from(arrayBuffer);
+
+    const knowledgeMap = await generateCourseKnowledgeMap(buffer, "application/pdf");
+
+    for (const [index, topicData] of knowledgeMap.topics.entries()) {
+      // 1. שמירת הנושא הראשי
+      const { data: insertedTopic, error: topicError } = await supabase
+        .from("course_topics")
+        .insert({
+          course_id: courseId,
+          topic_name: topicData.name,
+          order_index: index + 1,
+          status_color: 'red'
+        })
+        .select()
+        .single();
+
+      if (topicError || !insertedTopic) continue;
+
+      // 2. שמירת תת-הנושאים (Concepts) המשויכים אליו
+      if (topicData.concepts && Array.isArray(topicData.concepts)) {
+        const conceptsToInsert = topicData.concepts.map((c: any) => ({
+          topic_id: insertedTopic.id,
+          course_id: courseId,
+          concept_name: c.name,
+          description: c.description || '',
+          recall_prompt: c.recallPrompt || `הסבר את המושג ${c.name}`,
+          status_color: 'red'
+        }));
+
+        await supabase.from("course_concepts").insert(conceptsToInsert);
+      }
+    }
+
+    return NextResponse.json({ success: true });
+  } catch (err: any) {
+    return NextResponse.json({ error: err.message || "Failed to extract structure" }, { status: 500 });
+  }
+}
+</file>
+
+<file path="app/api/plan/generate/route.ts">
+import { NextResponse } from "next/server";
+import { supabase } from "@/lib/supabaseClient";
+import { GoogleGenerativeAI } from "@google/generative-ai";
+
+const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY || "");
+
+export async function POST(request: Request) {
+  try {
+    const { courseId, examDate, availableHoursPerDay } = await request.json();
+
+    if (!courseId || !examDate) {
+      return NextResponse.json({ error: "Missing required parameters" }, { status: 400 });
+    }
+
+    // 1. שליפת נושאים, שכיחות במבחנים וסטטוס מושגים
+    const [{ data: topics }, { data: stats }, { data: concepts }] = await Promise.all([
+      supabase.from("course_topics").select("id, title").eq("course_id", courseId),
+      supabase.from("course_topic_stats").select("topic_id, appearance_percentage, question_count").eq("course_id", courseId),
+      supabase.from("course_concepts").select("topic_id, status_color").eq("course_id", courseId)
+    ]);
+
+    // 2. חישוב ציון עדיפות לכל נושא (משקל שכיחות במבחן + מושגים לתרגול)
+    const prioritizedTopics = (topics || []).map((topic) => {
+      const stat = stats?.find((s) => s.topic_id === topic.id);
+      const topicConcepts = concepts?.filter((c) => c.topic_id === topic.id) || [];
+      const weakConceptsCount = topicConcepts.filter((c) => c.status_color === "red" || c.status_color === "yellow").length;
+
+      const appearanceWeight = stat?.appearance_percentage || 0;
+      // נוסחת שקול: שכיחות במבחן כפול 1.5 + כמות מושגים חלשים כפול 2
+      const priorityScore = (appearanceWeight * 1.5) + (weakConceptsCount * 2);
+
+      return {
+        id: topic.id,
+        title: topic.title,
+        appearancePercentage: appearanceWeight,
+        weakConceptsCount,
+        priorityScore
+      };
+    }).sort((a, b) => b.priorityScore - a.priorityScore);
+
+    // 3. יצירת תוכנית מותאמת אישית עם Gemini
+    const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+
+    const prompt = `
+      You are an academic study planner assistant.
+      Generate an optimized daily study plan leading up to the exam date: ${examDate}.
+      Student's daily study limit: ${availableHoursPerDay || 4} hours/day.
+
+      Topic Priorities (Sorted by high exam frequency and student weakness):
+      ${JSON.stringify(prioritizedTopics, null, 2)}
+
+      Instructions:
+      1. Allocate the highest study hours and earlier schedule slots to topics with high appearancePercentage and priorityScore.
+      2. Include active recall sessions for red/yellow flashcards.
+      3. Reserve the last 1-2 days before the exam strictly for full exam simulations and trap question reviews.
+      4. Return ONLY valid JSON with no markdown syntax.
+
+      Schema format:
+      {
+        "schedule": [
+          {
+            "dayNumber": 1,
+            "dateLabel": "String",
+            "focusTopics": ["Topic Name"],
+            "allocatedHours": 4,
+            "tasks": ["Task description"]
+          }
+        ]
+      }
+    `;
+
+    const result = await model.generateContent(prompt);
+    const text = result.response.text();
+    const cleanJson = text.replace(/```json/g, "").replace(/```/g, "").trim();
+    const planData = JSON.parse(cleanJson);
+
+    return NextResponse.json({
+      success: true,
+      schedule: planData.schedule,
+      prioritizedTopics
+    });
+  } catch (err: any) {
+    return NextResponse.json(
+      { error: err.message || "Failed to generate weighted study plan" },
+      { status: 500 }
+    );
+  }
+}
+</file>
+
+<file path="app/api/study/progress/route.ts">
+import { NextResponse } from 'next/server';
+import { supabase } from '../../../../lib/supabaseClient';
+
+export async function POST(request: Request) {
+  try {
+    // THIS is the part that was missing! It gets the logged-in user.
+    const { data: { user } } = await supabase.auth.getUser();
+    if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+
+    const { questionId, isCorrect, currentLevel } = await request.json();
+
+    // Spaced repetition logic: adjust level based on correctness
+    let newLevel = isCorrect ? Math.min(5, (currentLevel || 0) + 1) : Math.max(1, (currentLevel || 1) - 1);
+    
+    // Calculate next review time based on the new mastery level
+    const hoursToNextReview = [0, 12, 24, 72, 168, 336]; // L0=0h, L1=12h, L2=24h, L3=3d, L4=7d, L5=14d
+    const nextDate = new Date();
+    nextDate.setHours(nextDate.getHours() + hoursToNextReview[newLevel]);
+
+    const { data, error } = await supabase
+      .from('user_question_progress')
+      .upsert({
+        user_id: user.id,
+        question_id: questionId,
+        mastery_level: newLevel,
+        next_review_date: nextDate.toISOString(),
+        last_reviewed_at: new Date().toISOString()
+      }, { onConflict: 'user_id, question_id' })
+      .select()
+      .single();
+
+    if (error) throw error;
+
+    return NextResponse.json({ message: 'Progress updated', data }, { status: 200 });
+
+  } catch (error: any) {
+    return NextResponse.json({ error: error.message }, { status: 500 });
+  }
+}
+</file>
+
+<file path="app/context-input/page.tsx">
+"use client";
+
+import { useState } from 'react';
+import { useRouter } from 'next/navigation';
+
+export default function ContextInputPage() {
+  const router = useRouter();
+  const [examDate, setExamDate] = useState('');
+  const [studyHours, setStudyHours] = useState<number>(15);
+  const [targetGrade, setTargetGrade] = useState('A');
+  
+  const [isSubmitting, setIsSubmitting] = useState(false);
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setIsSubmitting(true);
+
+    // Construct the context payload
+    const contextData = {
+      courseId: '00000000-0000-0000-0000-000000000001', // Mock ID for V1
+      examDate,
+      studyHoursPerWeek: studyHours,
+      targetGrade
+    };
+
+    try {
+      const response = await fetch('/api/plan/generate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(contextData),
+      });
+
+      const data = await response.json();
+
+      if (!response.ok) {
+        throw new Error(data.error || 'Failed to generate study plan.');
+      }
+      
+      // Redirect to the dashboard to view the plan
+      router.push('/dashboard');
+      
+    } catch (error: any) {
+      console.error("Failed to save context", error);
+      alert(error.message);
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  return (
+    <div className="min-h-screen bg-gray-50 py-12 px-4 sm:px-6 lg:px-8">
+      <div className="max-w-2xl mx-auto bg-white rounded-xl shadow-md overflow-hidden">
+        <div className="px-8 py-6 border-b border-gray-200 bg-blue-600">
+          <h2 className="text-2xl font-bold text-white">Study Plan Parameters</h2>
+          <p className="mt-1 text-blue-100 text-sm">
+            Tell us about your schedule and goals so the AI can build a feasible plan.
+          </p>
+        </div>
+
+        <form onSubmit={handleSubmit} className="p-8 space-y-8">
+          
+          {/* Exam Date Section */}
+          <div>
+            <label className="block text-sm font-semibold text-gray-700">Final Exam Date</label>
+            <p className="text-xs text-gray-500 mb-2">When is the big day?</p>
+            <input 
+              type="date" 
+              required
+              value={examDate}
+              onChange={(e) => setExamDate(e.target.value)}
+              className="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm"
+            />
+          </div>
+
+          {/* Study Hours Section */}
+          <div>
+            <label className="block text-sm font-semibold text-gray-700">
+              Available Study Hours (Per Week)
+            </label>
+            <p className="text-xs text-gray-500 mb-4">Be realistic about how much time you can dedicate.</p>
+            
+            <div className="flex items-center space-x-4">
+              <input 
+                type="range" 
+                min="1" 
+                max="40" 
+                value={studyHours}
+                onChange={(e) => setStudyHours(Number(e.target.value))}
+                className="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer"
+              />
+              <span className="text-lg font-bold text-blue-600 w-12 text-center">
+                {studyHours}h
+              </span>
+            </div>
+          </div>
+
+          {/* Target Grade Section */}
+          <div>
+            <label className="block text-sm font-semibold text-gray-700">Target Grade</label>
+            <p className="text-xs text-gray-500 mb-2">What score are you aiming for?</p>
+            <select
+              value={targetGrade}
+              onChange={(e) => setTargetGrade(e.target.value)}
+              className="mt-1 block w-full px-3 py-2 bg-white border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm"
+            >
+              <option value="Pass">Just Pass (C / ~70%)</option>
+              <option value="B">Good (B / ~80%)</option>
+              <option value="A">Excellent (A / ~90%)</option>
+              <option value="A+">Mastery (A+ / 95%+)</option>
+            </select>
+          </div>
+
+          {/* Submit Button */}
+          <div className="pt-4 border-t border-gray-200">
+            <button
+              type="submit"
+              disabled={isSubmitting}
+              className={`w-full flex justify-center py-3 px-4 border border-transparent rounded-md shadow-sm text-sm font-medium text-white ${
+                isSubmitting ? 'bg-blue-400 cursor-not-allowed' : 'bg-blue-600 hover:bg-blue-700'
+              } focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 transition-colors`}
+            >
+              {isSubmitting ? 'Saving Parameters...' : 'Confirm Parameters'}
+            </button>
+          </div>
+
+        </form>
+      </div>
+    </div>
+  );
+}
+</file>
+
+<file path="app/exams/page.tsx">
+"use client";
+
+import { useEffect, useState } from 'react';
+import { supabase } from '../../lib/supabaseClient';
+
+export default function ExamsManagerPage() {
+  const [files, setFiles] = useState<any[]>([]);
+  const [questions, setQuestions] = useState<any[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [processingId, setProcessingId] = useState<string | null>(null);
+
+  // Fetch files and questions on load
+  const fetchData = async () => {
+    setLoading(true);
+    const { data: { user } } = await supabase.auth.getUser();
+    if (!user) return;
+
+    // Fetch uploaded exam files
+    const { data: filesData } = await supabase
+      .from('course_files')
+      .select('*')
+      .eq('user_id', user.id)
+      .eq('file_type', 'exam')
+      .order('created_at', { ascending: false });
+
+    if (filesData) setFiles(filesData);
+
+    // Fetch already extracted questions
+    const { data: questionsData } = await supabase
+      .from('exam_questions')
+      .select('*')
+      .eq('user_id', user.id)
+      .order('created_at', { ascending: false });
+
+    if (questionsData) setQuestions(questionsData);
+    setLoading(false);
+  };
+
+  useEffect(() => {
+    fetchData();
+  }, []);
+
+  const handleExtract = async (fileId: string, courseId: string) => {
+    setProcessingId(fileId);
+    try {
+      const response = await fetch('/api/ai/parse-exam', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ fileId, courseId }),
+      });
+
+      const data = await response.json();
+
+      if (!response.ok) {
+        throw new Error(data.error || 'Failed to extract questions.');
+      }
+
+      alert(data.message);
+      fetchData(); // Refresh the lists
+    } catch (error: any) {
+      console.error("Extraction Error:", error);
+      alert(error.message);
+    } finally {
+      setProcessingId(null);
+    }
+  };
+
+  if (loading) {
+    return <div className="min-h-screen flex items-center justify-center bg-gray-50 text-gray-500">Loading Exam Manager...</div>;
+  }
+
+  return (
+    <div className="min-h-screen bg-gray-100 py-8 px-4 sm:px-6 lg:px-8">
+      <div className="max-w-6xl mx-auto space-y-8">
+        
+        {/* Header */}
+        <div className="bg-white rounded-xl shadow p-6 border-l-4 border-indigo-600">
+          <h1 className="text-2xl font-bold text-gray-900">Exam Extraction Manager</h1>
+          <p className="text-sm text-gray-500 mt-1">Process your uploaded past papers and view the AI-extracted practice questions.</p>
+        </div>
+
+        {/* Uploaded Exams Table */}
+        <div className="bg-white rounded-xl shadow overflow-hidden">
+          <div className="px-6 py-4 border-b border-gray-200 bg-gray-50">
+            <h2 className="text-lg font-semibold text-gray-800">Uploaded Past Papers</h2>
+          </div>
+          <div className="p-6">
+            {files.length === 0 ? (
+              <p className="text-gray-500 text-sm">No exam files uploaded yet.</p>
+            ) : (
+              <ul className="space-y-4">
+                {files.map(file => (
+                  <li key={file.id} className="flex items-center justify-between p-4 border border-gray-200 rounded-lg">
+                    <div>
+                      <p className="font-medium text-gray-900">{file.file_name}</p>
+                      <p className="text-xs text-gray-500">Status: <span className={file.ingestion_status === 'completed' ? 'text-green-600 font-semibold' : 'text-yellow-600 font-semibold'}>{file.ingestion_status.toUpperCase()}</span></p>
+                    </div>
+                    <button
+                      onClick={() => handleExtract(file.id, file.course_id)}
+                      disabled={processingId === file.id || file.ingestion_status === 'completed'}
+                      className={`px-4 py-2 rounded-md text-sm font-medium text-white transition-colors ${
+                        file.ingestion_status === 'completed' ? 'bg-gray-400 cursor-not-allowed' :
+                        processingId === file.id ? 'bg-indigo-400 cursor-wait' : 'bg-indigo-600 hover:bg-indigo-700'
+                      }`}
+                    >
+                      {processingId === file.id ? 'Extracting...' : file.ingestion_status === 'completed' ? 'Extracted' : 'Extract Questions'}
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+        </div>
+
+        {/* Extracted Questions Grid */}
+        <div className="bg-white rounded-xl shadow overflow-hidden">
+          <div className="px-6 py-4 border-b border-gray-200 bg-gray-50 flex justify-between items-center">
+            <h2 className="text-lg font-semibold text-gray-800">Question Bank ({questions.length})</h2>
+          </div>
+          <div className="p-6">
+            {questions.length === 0 ? (
+              <p className="text-gray-500 text-sm">No questions extracted yet. Run an extraction above!</p>
+            ) : (
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                {questions.map((q) => (
+                  <div key={q.id} className="border border-gray-200 p-4 rounded-lg bg-gray-50 flex flex-col justify-between">
+                    <div>
+                      <div className="flex justify-between items-start mb-2">
+                        <span className="bg-blue-100 text-blue-800 text-xs font-semibold px-2 py-1 rounded">{q.topic || 'General'}</span>
+                        <span className={`text-xs font-semibold px-2 py-1 rounded ${
+                          q.difficulty === 'Hard' ? 'bg-red-100 text-red-800' :
+                          q.difficulty === 'Medium' ? 'bg-yellow-100 text-yellow-800' :
+                          'bg-green-100 text-green-800'
+                        }`}>{q.difficulty || 'Unrated'}</span>
+                      </div>
+                      <p className="text-sm text-gray-800 font-medium mb-4">{q.question_text}</p>
+                    </div>
+                    {q.solution_text && (
+                      <div className="mt-4 pt-3 border-t border-gray-200">
+                        <p className="text-xs text-gray-500 uppercase tracking-wide font-semibold mb-1">Solution:</p>
+                        <p className="text-sm text-gray-700 italic">{q.solution_text}</p>
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+
+      </div>
+    </div>
+  );
+}
+</file>
+
+<file path="app/study/page.tsx">
+"use client";
+
+import { useEffect, useState } from "react";
+import { supabase } from "@/lib/supabaseClient";
+
+interface Concept {
+  id: string;
+  concept_name: string;
+  description?: string;
+  recall_prompt: string;
+  recall_answer?: string;
+  item_type?: "concept" | "formula" | "theorem";
+  detailed_explanation?: string;
+  status_color: string;
+}
+
+interface TrapQuestion {
+  id: string;
+  question_number: number;
+  question_text: string;
+  solution_text: string;
+  guidance_notes: string;
+}
+
+export default function StudyPage() {
+  const [mode, setMode] = useState<"flashcards" | "traps">("flashcards");
+  const [concepts, setConcepts] = useState<Concept[]>([]);
+  const [traps, setTraps] = useState<TrapQuestion[]>([]);
+  const [currentIndex, setCurrentIndex] = useState(0);
+  const [isFlipped, setIsFlipped] = useState(false);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    fetchData();
+  }, []);
+
+  async function fetchData() {
+    setLoading(true);
+
+    const [{ data: conceptsData }, { data: trapsData }] = await Promise.all([
+      supabase.from("course_concepts").select("*").in("status_color", ["red", "yellow"]),
+      supabase.from("exam_questions").select("*").eq("is_trap", true),
+    ]);
+
+    setConcepts(conceptsData || []);
+    setTraps(trapsData || []);
+    setLoading(false);
+  }
+
+  const updateConceptStatus = async (id: string, color: "red" | "yellow" | "green") => {
+    await supabase.from("course_concepts").update({ status_color: color }).eq("id", id);
+    setConcepts((prev) => prev.filter((c) => c.id !== id));
+    setIsFlipped(false);
+  };
+
+  const getItemTypeBadge = (type?: string) => {
+    switch (type) {
+      case "formula":
+        return <span className="bg-purple-100 text-purple-800 text-xs px-2.5 py-0.5 rounded-full font-bold">📐 נוסחה</span>;
+      case "theorem":
+        return <span className="bg-indigo-100 text-indigo-800 text-xs px-2.5 py-0.5 rounded-full font-bold">📜 משפט / הגדרה</span>;
+      default:
+        return <span className="bg-blue-100 text-blue-800 text-xs px-2.5 py-0.5 rounded-full font-bold">💡 מושג</span>;
+    }
+  };
+
+  if (loading) {
+    return <div className="p-8 text-center dir-rtl">טוען את מחולל התרגול וה-Flashcards...</div>;
+  }
+
+  return (
+    <div className="max-w-3xl mx-auto p-6 dir-rtl" dir="rtl">
+      {/* סרגל ניווט */}
+      <div className="flex border-b mb-6">
+        <button
+          onClick={() => { setMode("flashcards"); setCurrentIndex(0); setIsFlipped(false); }}
+          className={`pb-3 px-6 font-semibold text-sm border-b-2 ${
+            mode === "flashcards"
+              ? "border-blue-600 text-blue-600"
+              : "border-transparent text-gray-500 hover:text-gray-700"
+          }`}
+        >
+          🎴 Flashcards דו-צדדיים ({concepts.length})
+        </button>
+        <button
+          onClick={() => { setMode("traps"); setCurrentIndex(0); setIsFlipped(false); }}
+          className={`pb-3 px-6 font-semibold text-sm border-b-2 ${
+            mode === "traps"
+              ? "border-red-600 text-red-600"
+              : "border-transparent text-gray-500 hover:text-gray-700"
+          }`}
+        >
+          🔥 שאלות פינה ומלכודות ({traps.length})
+        </button>
+      </div>
+
+      {/* מצב 1: Flashcards דו-צדדיים */}
+      {mode === "flashcards" && (
+        <div>
+          {concepts.length === 0 ? (
+            <div className="text-center py-12 bg-white rounded-lg border">
+              <p className="text-gray-500 font-medium">כל הכבוד! אין מושגים או נוסחאות לתרגול 🎉</p>
+            </div>
+          ) : (
+            <div className="space-y-6">
+              {/* כרטיסייה מתהפכת */}
+              <div
+                onClick={() => setIsFlipped(!isFlipped)}
+                className="cursor-pointer bg-white rounded-2xl border border-gray-200 p-8 shadow-md hover:shadow-lg transition-all min-h-[300px] flex flex-col justify-between relative"
+              >
+                <div className="flex justify-between items-center text-xs">
+                  {getItemTypeBadge(concepts[currentIndex]?.item_type)}
+                  <span className="text-gray-400">
+                    כרטיס {currentIndex + 1} מתוך {concepts.length} (לחץ להפיכה 🔄)
+                  </span>
+                </div>
+
+                <div className="my-auto text-center py-6">
+                  {!isFlipped ? (
+                    /* צד א': שאלה / נוסחה לרענון */
+                    <div className="space-y-3">
+                      <span className="text-xs font-semibold text-gray-400 block">צד א' - שאלה / זיהוי:</span>
+                      <h2 className="text-2xl font-bold text-gray-900">
+                        {concepts[currentIndex]?.concept_name}
+                      </h2>
+                      <p className="text-base text-gray-700 font-medium max-w-xl mx-auto bg-blue-50/50 p-4 rounded-xl border border-blue-100">
+                        {concepts[currentIndex]?.recall_prompt}
+                      </p>
+                    </div>
+                  ) : (
+                    /* צד ב': פתרון / הסבר מפורט */
+                    <div className="space-y-4">
+                      <span className="text-xs font-semibold text-green-600 block">צד ב' - פתרון / הסבר מלא:</span>
+                      <div className="text-base font-semibold text-green-900 bg-green-50 p-4 rounded-xl border border-green-200 whitespace-pre-line">
+                        {concepts[currentIndex]?.recall_answer || concepts[currentIndex]?.description || "אין תשובה מוגדרת."}
+                      </div>
+                      {concepts[currentIndex]?.detailed_explanation && (
+                        <p className="text-xs text-gray-600 bg-gray-50 p-3 rounded-lg border text-right">
+                          💡 <strong>דגשים נוספים:</strong> {concepts[currentIndex]?.detailed_explanation}
+                        </p>
+                      )}
+                    </div>
+                  )}
+                </div>
+
+                <div className="text-center text-xs text-gray-400 border-t pt-3">
+                  {isFlipped ? "לחץ שוב כדי לחזור לצד הקדמי" : "לחץ על הכרטיסייה כדי לגלות את התשובה וההסבר"}
+                </div>
+              </div>
+
+              {/* סרגל משוב וצבעים (מוצג תמיד או לאחר הפיכה) */}
+              <div className="bg-white p-4 rounded-xl border shadow-sm space-y-2">
+                <p className="text-xs font-bold text-gray-700 text-center">איך הייתה השליטה שלך בפריט זה?</p>
+                <div className="grid grid-cols-3 gap-3">
+                  <button
+                    onClick={() => updateConceptStatus(concepts[currentIndex].id, "red")}
+                    className="bg-red-600 text-white text-xs py-2.5 rounded-lg font-semibold hover:bg-red-700"
+                  >
+                    לא זוכר (אדום 🔴)
+                  </button>
+                  <button
+                    onClick={() => updateConceptStatus(concepts[currentIndex].id, "yellow")}
+                    className="bg-yellow-500 text-white text-xs py-2.5 rounded-lg font-semibold hover:bg-yellow-600"
+                  >
+                    שליטה חלקית (צהוב 🟡)
+                  </button>
+                  <button
+                    onClick={() => updateConceptStatus(concepts[currentIndex].id, "green")}
+                    className="bg-green-600 text-white text-xs py-2.5 rounded-lg font-semibold hover:bg-green-700"
+                  >
+                    שולט מצוין (ירוק 🟢)
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* מצב 2: שאלות מלכודת */}
+      {mode === "traps" && (
+        <div>
+          {traps.length === 0 ? (
+            <div className="text-center py-12 bg-white rounded-lg border">
+              <p className="text-gray-500 font-medium">לא נמצאו שאלות מלכודת במבחנים.</p>
+            </div>
+          ) : (
+            <div className="bg-white rounded-xl border p-8 shadow-sm space-y-6">
+              <div className="flex justify-between items-center text-xs text-gray-400 font-medium">
+                <span>שאלה {currentIndex + 1} מתוך {traps.length}</span>
+                <span className="bg-red-100 text-red-700 px-2 py-0.5 rounded font-semibold">
+                  🔥 שאלת מלכודת
+                </span>
+              </div>
+
+              <div>
+                <h3 className="text-lg font-bold text-gray-900 mb-2">
+                  שאלה {traps[currentIndex]?.question_number}
+                </h3>
+                <p className="text-sm bg-gray-50 p-3.5 rounded border text-gray-800">
+                  {traps[currentIndex]?.question_text}
+                </p>
+              </div>
+
+              {!isFlipped ? (
+                <button
+                  onClick={() => setIsFlipped(true)}
+                  className="w-full bg-red-600 text-white py-3 rounded-lg font-medium hover:bg-red-700"
+                >
+                  חשוף את המלכודת והפתרון המלא 🔥
+                </button>
+              ) : (
+                <div className="space-y-4 pt-4 border-t">
+                  {traps[currentIndex]?.guidance_notes && (
+                    <div>
+                      <h4 className="text-xs font-bold text-amber-800 mb-1">⚠️ איפה המלכודת?</h4>
+                      <p className="text-sm bg-amber-50 p-3 rounded border border-amber-200 text-amber-900">
+                        {traps[currentIndex]?.guidance_notes}
+                      </p>
+                    </div>
+                  )}
+
+                  {traps[currentIndex]?.solution_text && (
+                    <div>
+                      <h4 className="text-xs font-bold text-green-800 mb-1">פתרון מודרך:</h4>
+                      <p className="text-sm bg-green-50 p-3 rounded border border-green-200 text-green-900 whitespace-pre-line">
+                        {traps[currentIndex]?.solution_text}
+                      </p>
+                    </div>
+                  )}
+
+                  <button
+                    onClick={() => {
+                      setIsFlipped(false);
+                      setCurrentIndex((prev) => (prev + 1) % traps.length);
+                    }}
+                    className="w-full bg-gray-800 text-white py-2.5 rounded-lg text-sm hover:bg-gray-900"
+                  >
+                    עבור לשאלת המלכודת הבאה ➔
+                  </button>
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+</file>
+
+<file path="app/topics/page.tsx">
+"use client";
+
+import { useEffect, useState } from "react";
+import { supabase } from "@/lib/supabaseClient";
+
+interface Concept {
+  id: string;
+  concept_name: string;
+  description: string;
+  recall_prompt: string;
+  status_color: "red" | "yellow" | "green";
+}
+
+interface Topic {
+  id: string;
+  topic_name: string;
+  status_color: "red" | "yellow" | "green";
+  concepts: Concept[];
+  isExpanded?: boolean;
+}
+
+export default function TopicsPage() {
+  const [topics, setTopics] = useState<Topic[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [selectedConcept, setSelectedConcept] = useState<Concept | null>(null);
+  const [userAnswer, setUserAnswer] = useState("");
+  const [showFeedback, setShowFeedback] = useState(false);
+
+  useEffect(() => {
+    fetchTreeData();
+  }, []);
+
+  async function fetchTreeData() {
+    setLoading(true);
+    const { data: topicsData, error: topicsErr } = await supabase
+      .from("course_topics")
+      .select("*")
+      .order("order_index", { ascending: true });
+
+    if (topicsErr || !topicsData) {
+      setLoading(false);
+      return;
+    }
+
+    const { data: conceptsData } = await supabase
+      .from("course_concepts")
+      .select("*");
+
+    const fullTree = topicsData.map((t) => ({
+      ...t,
+      isExpanded: true,
+      concepts: (conceptsData || []).filter((c) => c.topic_id === t.id),
+    }));
+
+    setTopics(fullTree);
+    setLoading(false);
+  }
+
+  const toggleExpand = (topicId: string) => {
+    setTopics((prev) =>
+      prev.map((t) => (t.id === topicId ? { ...t, isExpanded: !t.isExpanded } : t))
+    );
+  };
+
+  const updateColor = async (
+    type: "topic" | "concept",
+    id: string,
+    color: "red" | "yellow" | "green"
+  ) => {
+    const table = type === "topic" ? "course_topics" : "course_concepts";
+    
+    await supabase.from(table).update({ status_color: color }).eq("id", id);
+
+    setTopics((prev) =>
+      prev.map((t) => {
+        if (type === "topic" && t.id === id) {
+          return { ...t, status_color: color };
+        }
+        if (type === "concept") {
+          return {
+            ...t,
+            concepts: t.concepts.map((c) =>
+              c.id === id ? { ...c, status_color: color } : c
+            ),
+          };
+        }
+        return t;
+      })
+    );
+  };
+
+  if (loading) {
+    return <div className="p-8 text-center dir-rtl">טוען את מפת הנושאים והמושגים...</div>;
+  }
+
+  return (
+    <div className="max-w-4xl mx-auto p-6 dir-rtl" dir="rtl">
+      <h1 className="text-2xl font-bold mb-6">מפת ידע היררכית - Active Recall</h1>
+
+      <div className="space-y-4">
+        {topics.map((topic) => (
+          <div key={topic.id} className="border rounded-lg p-4 bg-white shadow-sm">
+            {/* שורת נושא ראשי */}
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-3">
+                <button
+                  onClick={() => toggleExpand(topic.id)}
+                  className="w-6 h-6 flex items-center justify-center border rounded font-mono font-bold"
+                >
+                  {topic.isExpanded ? "-" : "+"}
+                </button>
+                <span className="font-semibold text-lg">{topic.topic_name}</span>
+              </div>
+
+              {/* בורר צבעי סטטוס נושא */}
+              <div className="flex items-center gap-2">
+                <ColorPicker
+                  currentColor={topic.status_color}
+                  onChange={(color) => updateColor("topic", topic.id, color)}
+                />
+              </div>
+            </div>
+
+            {/* רשימת תת-נושאים (Concepts) */}
+            {topic.isExpanded && (
+              <div className="mt-3 mr-8 border-r-2 border-gray-200 pr-4 space-y-3">
+                {topic.concepts.length === 0 ? (
+                  <p className="text-sm text-gray-400">אין תת-נושאים מוגדרים</p>
+                ) : (
+                  topic.concepts.map((concept) => (
+                    <div
+                      key={concept.id}
+                      className="flex items-center justify-between p-2 rounded bg-gray-50 border"
+                    >
+                      <div>
+                        <div className="font-medium text-gray-800">
+                          {concept.concept_name}
+                        </div>
+                        {concept.description && (
+                          <div className="text-xs text-gray-500">
+                            {concept.description}
+                          </div>
+                        )}
+                      </div>
+
+                      <div className="flex items-center gap-3">
+                        <button
+                          onClick={() => {
+                            setSelectedConcept(concept);
+                            setUserAnswer("");
+                            setShowFeedback(false);
+                          }}
+                          className="text-xs bg-blue-600 text-white px-3 py-1 rounded hover:bg-blue-700"
+                        >
+                          בחינה עצמית (Active Recall)
+                        </button>
+
+                        <ColorPicker
+                          currentColor={concept.status_color}
+                          onChange={(color) =>
+                            updateColor("concept", concept.id, color)
+                          }
+                        />
+                      </div>
+                    </div>
+                  ))
+                )}
+              </div>
+            )}
+          </div>
+        ))}
+      </div>
+
+      {/* חלונית תרגול Active Recall */}
+      {selectedConcept && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-50">
+          <div className="bg-white p-6 rounded-lg max-w-lg w-full space-y-4">
+            <h3 className="text-xl font-bold">
+              Active Recall: {selectedConcept.concept_name}
+            </h3>
+            <p className="text-gray-700 font-medium">
+              {selectedConcept.recall_prompt}
+            </p>
+
+            <textarea
+              value={userAnswer}
+              onChange={(e) => setUserAnswer(e.target.value)}
+              placeholder="כתוב את התשובה/הסבר שלך כאן..."
+              className="w-full border rounded p-2 h-28 text-sm"
+            />
+
+            {!showFeedback ? (
+              <button
+                onClick={() => setShowFeedback(true)}
+                className="w-full bg-green-600 text-white py-2 rounded font-medium hover:bg-green-700"
+              >
+                בדוק תשובה והצג פידבק
+              </button>
+            ) : (
+              <div className="space-y-3 bg-blue-50 p-3 rounded border border-blue-200">
+                <p className="text-xs font-semibold text-blue-900">
+                  הערכה עצמית: האם הצלחת לשחזר את המושג בבירור?
+                </p>
+                <div className="flex gap-2">
+                  <button
+                    onClick={() => {
+                      updateColor("concept", selectedConcept.id, "green");
+                      setSelectedConcept(null);
+                    }}
+                    className="flex-1 bg-green-600 text-white text-xs py-1.5 rounded"
+                  >
+                    שולט מצוין (ירוק)
+                  </button>
+
+                  <button
+                    onClick={() => {
+                      updateColor("concept", selectedConcept.id, "yellow");
+                      setSelectedConcept(null);
+                    }}
+                    className="flex-1 bg-yellow-500 text-white text-xs py-1.5 rounded"
+                  >
+                    חלקית / בינוני (צהוב)
+                  </button>
+
+                  <button
+                    onClick={() => {
+                      updateColor("concept", selectedConcept.id, "red");
+                      setSelectedConcept(null);
+                    }}
+                    className="flex-1 bg-red-600 text-white text-xs py-1.5 rounded"
+                  >
+                    לא זוכר (אדום)
+                  </button>
+                </div>
+              </div>
+            )}
+
+            <button
+              onClick={() => setSelectedConcept(null)}
+              className="w-full text-xs text-gray-500 underline pt-2"
+            >
+              סגור
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ColorPicker({
+  currentColor,
+  onChange,
+}: {
+  currentColor: "red" | "yellow" | "green";
+  onChange: (color: "red" | "yellow" | "green") => void;
+}) {
+  return (
+    <div className="flex items-center gap-1">
+      <button
+        onClick={() => onChange("red")}
+        className={`w-4 h-4 rounded-full bg-red-500 ${
+          currentColor === "red" ? "ring-2 ring-offset-1 ring-black" : "opacity-40"
+        }`}
+      />
+      <button
+        onClick={() => onChange("yellow")}
+        className={`w-4 h-4 rounded-full bg-yellow-400 ${
+          currentColor === "yellow" ? "ring-2 ring-offset-1 ring-black" : "opacity-40"
+        }`}
+      />
+      <button
+        onClick={() => onChange("green")}
+        className={`w-4 h-4 rounded-full bg-green-500 ${
+          currentColor === "green" ? "ring-2 ring-offset-1 ring-black" : "opacity-40"
+        }`}
+      />
+    </div>
+  );
+}
+</file>
+
+<file path="package.json">
+{
+"name": "ss-study-smarter",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "eslint"
+  },
+  "dependencies": {
+    "@google/generative-ai": "^0.24.1",
+    "@supabase/supabase-js": "^2.112.3",
+    "next": "16.3.1",
+    "react": "19.2.8",
+    "react-dom": "19.2.8"
+  },
+  "devDependencies": {
+    "@tailwindcss/postcss": "^4",
+    "@types/node": "^20",
+    "@types/react": "^19",
+    "@types/react-dom": "^19",
+    "eslint": "^9",
+    "eslint-config-next": "16.3.1",
+    "tailwindcss": "^4",
+    "typescript": "^5"
+  }
+}
+</file>
+
+<file path="app/page.tsx">
+"use client";
+
+import { useState } from "react";
+import { supabase } from "@/lib/supabaseClient";
+import { useRouter } from "next/navigation";
+
+export default function LandingPage() {
+  const router = useRouter();
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [isSignUp, setIsSignUp] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [errorMsg, setErrorMsg] = useState<string | null>(null);
+
+  const handleAuth = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setLoading(true);
+    setErrorMsg(null);
+
+    try {
+      if (isSignUp) {
+        const { error } = await supabase.auth.signUp({ email, password });
+        if (error) throw error;
+        alert("הרשמה בוצעה בהצלחה! ניתן להתחבר כעת.");
+        setIsSignUp(false);
+      } else {
+        const { error } = await supabase.auth.signInWithPassword({ email, password });
+        if (error) throw error;
+        router.push("/dashboard");
+      }
+    } catch (err: any) {
+      setErrorMsg(err.message || "שגיאה בתהליך ההתחברות");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div className="min-h-screen bg-gradient-to-b from-blue-50 to-white dir-rtl" dir="rtl">
+      {/* סרגל עליון */}
+      <header className="max-w-6xl mx-auto p-6 flex justify-between items-center">
+        <div className="flex items-center gap-2 font-extrabold text-2xl text-blue-600">
+          <span className="bg-blue-600 text-white px-3 py-1 rounded-xl text-base font-black">SS</span>
+          <span>Study Smarter</span>
+        </div>
+      </header>
+
+      {/* אזור ה-Hero והסבר על המערכת */}
+      <main className="max-w-6xl mx-auto px-6 py-12 grid grid-cols-1 md:grid-cols-2 gap-12 items-center">
+        <div className="space-y-6">
+          <span className="bg-blue-100 text-blue-800 text-xs font-bold px-3 py-1 rounded-full">
+            🚀 פלטפורמת ה-AI הבלעדית לסטודנטים
+          </span>
+          <h1 className="text-4xl font-extrabold text-gray-900 leading-tight">
+            ללמוד למבחנים חכם יותר, <br />
+            <span className="text-blue-600">100% מתואם לחומרי הקורס שלך.</span>
+          </h1>
+          <p className="text-gray-600 text-sm leading-relaxed">
+            SS - Study Smarter הופכת את סיכומי כתב היד, הסילבוסים ומבחני העבר שלך למאגר תרגול ממוקד.
+            אפס המצאות AI, בדיקה אוטומטית של פתרונות בכתב יד, ומפת חום של נושאי חובה בסיכון גבוה.
+          </p>
+
+          <div className="grid grid-cols-2 gap-4 pt-2">
+            <div className="bg-white p-4 rounded-xl border border-gray-100 shadow-sm">
+              <span className="text-xl">✍️</span>
+              <h3 className="font-bold text-xs mt-1">פענוח כתב יד</h3>
+              <p className="text-[11px] text-gray-500">העלאת מחברות בחינה וסריקות</p>
+            </div>
+            <div className="bg-white p-4 rounded-xl border border-gray-100 shadow-sm">
+              <span className="text-xl">🔥</span>
+              <h3 className="font-bold text-xs mt-1">מטריצת שכיחות</h3>
+              <p className="text-[11px] text-gray-500">זיהוי נושאי חובה בסיכון (80%+)</p>
+            </div>
+          </div>
+        </div>
+
+        {/* טופס התחברות / הרשמה */}
+        <div className="bg-white p-8 rounded-2xl border shadow-lg space-y-6 max-w-md mx-auto w-full">
+          <div>
+            <h2 className="text-xl font-bold text-gray-900">
+              {isSignUp ? "יצירת חשבון جديد" : "התחברות למערכת"}
+            </h2>
+            <p className="text-xs text-gray-500 mt-1">
+              {isSignUp ? "הרשם והתחל לנהל את הקורסים שלך" : "הכנס את הפרטים כדי לגשת לקורסים שלך"}
+            </p>
+          </div>
+
+          {errorMsg && (
+            <div className="p-3 bg-red-50 border border-red-200 text-red-700 text-xs rounded-lg">
+              {errorMsg}
+            </div>
+          )}
+
+          <form onSubmit={handleAuth} className="space-y-4">
+            <div>
+              <label className="text-xs font-bold text-gray-700 block mb-1">דוא"ל</label>
+              <input
+                type="email"
+                required
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+                className="w-full p-2.5 border rounded-lg text-xs"
+                placeholder="student@university.ac.il"
+              />
+            </div>
+
+            <div>
+              <label className="text-xs font-bold text-gray-700 block mb-1">סיסמה</label>
+              <input
+                type="password"
+                required
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                className="w-full p-2.5 border rounded-lg text-xs"
+                placeholder="••••••••"
+              />
+            </div>
+
+            <button
+              type="submit"
+              disabled={loading}
+              className="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-3 rounded-lg text-xs transition shadow-md"
+            >
+              {loading ? "מעבד..." : isSignUp ? "ירשם כעת" : "התחבר לחשבון"}
+            </button>
+          </form>
+
+          <div className="text-center pt-2 border-t">
+            <button
+              type="button"
+              onClick={() => setIsSignUp(!isSignUp)}
+              className="text-xs font-bold text-blue-600 hover:underline"
+            >
+              {isSignUp ? "כבר נרשמת? התחבר כאן" : "אין לך חשבון? הרשם כעת"}
+            </button>
+          </div>
+        </div>
+      </main>
+    </div>
+  );
+}
+</file>
+
+<file path="app/dashboard/page.tsx">
+"use client";
+
+import { useEffect, useState } from "react";
+import { supabase } from "@/lib/supabaseClient";
+import Link from "next/link";
+import { useRouter } from "next/navigation";
+
+interface Course {
+  id: string;
+  name: string;
+  code: string;
+  created_at: string;
+}
+
+export default function UserDashboard() {
+  const router = useRouter();
+  const [courses, setCourses] = useState<Course[]>([]);
+  const [newCourseName, setNewCourseName] = useState("");
+  const [newCourseCode, setNewCourseCode] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [creating, setCreating] = useState(false);
+
+  useEffect(() => {
+    async function loadUserCourses() {
+      const { data: { user } } = await supabase.auth.getUser();
+      if (!user) {
+        router.push("/");
+        return;
+      }
+
+      const { data } = await supabase
+        .from("courses")
+        .select("*")
+        .eq("user_id", user.id)
+        .order("created_at", { ascending: false });
+
+      if (data) setCourses(data);
+      setLoading(false);
+    }
+
+    loadUserCourses();
+  }, [router]);
+
+  const handleCreateCourse = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!newCourseName) return;
+
+    setCreating(true);
+    const { data: { user } } = await supabase.auth.getUser();
+
+    if (user) {
+      const { data, error } = await supabase
+        .from("courses")
+        .insert({
+          name: newCourseName,
+          code: newCourseCode,
+          user_id: user.id,
+        })
+        .select()
+        .single();
+
+      if (data) {
+        setCourses([data, ...courses]);
+        setNewCourseName("");
+        setNewCourseCode("");
+      }
+    }
+    setCreating(false);
+  };
+
+  if (loading) return <div className="p-8 text-center dir-rtl" dir="rtl">טוען את הקורסים שלך...</div>;
+
+  return (
+    <div className="max-w-5xl mx-auto p-6 dir-rtl space-y-8" dir="rtl">
+      <div className="flex justify-between items-center border-b pb-4">
+        <div>
+          <h1 className="text-2xl font-bold text-gray-900">📚 הקורסים שלי</h1>
+          <p className="text-xs text-gray-500 mt-1">בחר קורס כדי לצפות בחומרים, במטריצה ובסימולטורים.</p>
+        </div>
+      </div>
+
+      {/* יצירת קורס חדש */}
+      <div className="bg-white p-6 rounded-xl border shadow-sm">
+        <h2 className="text-sm font-bold text-gray-800 mb-3">➕ הוספת קורס חדש למערכת</h2>
+        <form onSubmit={handleCreateCourse} className="grid grid-cols-1 md:grid-cols-3 gap-3">
+          <input
+            type="text"
+            placeholder="שם הקורס (למשל: מבוא למיקרו כלכלה)"
+            value={newCourseName}
+            onChange={(e) => setNewCourseName(e.target.value)}
+            className="p-2.5 border rounded-lg text-xs"
+            required
+          />
+          <input
+            type="text"
+            placeholder="קוד קורס (אופציונלי)"
+            value={newCourseCode}
+            onChange={(e) => setNewCourseCode(e.target.value)}
+            className="p-2.5 border rounded-lg text-xs"
+          />
+          <button
+            type="submit"
+            disabled={creating}
+            className="bg-blue-600 hover:bg-blue-700 text-white font-bold text-xs rounded-lg p-2.5 transition"
+          >
+            {creating ? "יוצר..." : "צור קורס"}
+          </button>
+        </form>
+      </div>
+
+      {/* רשימת הקורסים */}
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+        {courses.length === 0 ? (
+          <div className="col-span-full text-center p-8 bg-gray-50 rounded-xl border text-gray-500 text-xs">
+            עדיין לא הקמת קורסים. צור את הקורס הראשון שלך למעלה!
+          </div>
+        ) : (
+          courses.map((c) => (
+            <Link
+              key={c.id}
+              href={`/courses/${c.id}`}
+              className="bg-white p-5 rounded-xl border hover:border-blue-500 hover:shadow-md transition space-y-3 block"
+            >
+              <div className="flex justify-between items-start">
+                <span className="text-xs font-bold text-blue-600 bg-blue-50 px-2 py-0.5 rounded">
+                  {c.code || "קורס"}
+                </span>
+                <span className="text-xs text-gray-400">כניסה לקורס ←</span>
+              </div>
+              <h3 className="font-bold text-base text-gray-900">{c.name}</h3>
+            </Link>
+          ))
+        )}
+      </div>
+    </div>
+  );
+}
+</file>
+
+<file path="app/matrix/page.tsx">
+"use client";
+
+import { useEffect, useState } from "react";
+import { getCourseMatrixAndAnalytics, MatrixAnalyticsResult } from "@/lib/services/analyticsService";
+import { supabase } from "@/lib/supabaseClient";
+
+export default function MatrixPage() {
+  const [data, setData] = useState<MatrixAnalyticsResult | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [courseId, setCourseId] = useState<string | null>(null);
+
+  useEffect(() => {
+    async function init() {
+      // שליפת הקורס הפילי
+      const { data: courses } = await supabase.from("courses").select("id").limit(1);
+      if (courses && courses.length > 0) {
+        setCourseId(courses[0].id);
+        const matrixData = await getCourseMatrixAndAnalytics(courses[0].id);
+        setData(matrixData);
+      }
+      setLoading(false);
+    }
+    init();
+  }, []);
+
+  if (loading) {
+    return <div className="p-8 text-center dir-rtl" dir="rtl">טוען את הטבלה המצליבה...</div>;
+  }
+
+  if (!data || data.matrixRows.length === 0) {
+    return (
+      <div className="p-8 text-center dir-rtl" dir="rtl">
+        <h2 className="text-xl font-bold">לא נמצאו נתונים</h2>
+        <p className="text-gray-500 text-sm mt-2">יש להעלות סילבוס ומבחנים במסך ה-Setup תחילה.</p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="max-w-7xl mx-auto p-6 dir-rtl" dir="rtl">
+      <div className="mb-6">
+        <h1 className="text-2xl font-bold text-gray-900">📊 מטריצה מצליבה: נושאים מול מועדי מבחנים</h1>
+        <p className="text-xs text-gray-500 mt-1">
+          הטבלה מציגה את השאלות המדויקות מכל מועד ומזהה אוטומטית נושאי חובה המופיעים באופן קבוע במבחנים.
+        </p>
+      </div>
+
+      <div className="overflow-x-auto bg-white rounded-xl border shadow-sm">
+        <table className="w-full text-sm text-right border-collapse">
+          <thead>
+            <tr className="bg-gray-100 border-b text-gray-700">
+              <th className="p-4 border-l font-bold min-w-[220px]">נושא בסילבוס</th>
+              <th className="p-4 border-l font-bold text-center w-28">שכיחות</th>
+              {data.exams.map((exam) => (
+                <th key={exam.id} className="p-4 border-l font-bold text-center min-w-[120px]">
+                  {exam.year} {exam.term}
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {data.matrixRows.map((row) => (
+              <tr
+                key={row.topicId}
+                className={`border-b hover:bg-gray-50 transition-colors ${
+                  row.isMandatory ? "bg-red-50/40" : ""
+                }`}
+              >
+                {/* שם הנושא ותגית נושא חובה */}
+                <td className="p-4 border-l">
+                  <div className="font-bold text-gray-800">{row.topicTitle}</div>
+                  {row.isMandatory && (
+                    <span className="inline-block mt-1 bg-red-600 text-white text-[10px] font-extrabold px-2 py-0.5 rounded-full">
+                      🔥 נושא חובה במבחנים (סבירות גבוהה)
+                    </span>
+                  )}
+                </td>
+
+                {/* אחוז שכיחות */}
+                <td className="p-4 border-l text-center font-bold">
+                  <span
+                    className={`inline-block px-2.5 py-1 rounded-full text-xs ${
+                      row.isMandatory
+                        ? "bg-red-100 text-red-800"
+                        : row.appearancePercentage >= 50
+                        ? "bg-yellow-100 text-yellow-800"
+                        : "bg-gray-100 text-gray-600"
+                    }`}
+                  >
+                    {row.appearancePercentage}%
+                  </span>
+                </td>
+
+                {/* שאלות לפי מועדים */}
+                {data.exams.map((exam) => {
+                  const qNumbers = row.examQuestionsMap[exam.id];
+                  return (
+                    <td key={exam.id} className="p-4 border-l text-center">
+                      {qNumbers && qNumbers.length > 0 ? (
+                        <div className="flex flex-wrap gap-1 justify-center">
+                          {qNumbers.map((qNum) => (
+                            <span
+                              key={qNum}
+                              className="bg-blue-100 text-blue-900 border border-blue-200 font-semibold px-2 py-0.5 rounded text-xs"
+                            >
+                              שאלה {qNum}
+                            </span>
+                          ))}
+                        </div>
+                      ) : (
+                        <span className="text-gray-300 text-xs">—</span>
+                      )}
+                    </td>
+                  );
+                })}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+</file>
+
+<file path="app/study/focused/page.tsx">
+"use client";
+
+import { useEffect, useState } from "react";
+import { supabase } from "@/lib/supabaseClient";
+
+interface Question {
+  id: string;
+  question_text: string;
+  solution_text: string;
+  topic_id: string;
+}
+
+interface ProgressState {
+  attempts_count: number;
+  is_first_try_correct: boolean | null;
+}
+
+export default function FocusedPracticeWithTracking() {
+  const [questions, setQuestions] = useState<Question[]>([]);
+  const [progress, setProgress] = useState<Record<string, ProgressState>>({});
+  const [userAnswers, setUserAnswers] = useState<Record<string, string>>({});
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    async function loadQuestionsAndProgress() {
+      // 1. שליפת השאלה מתוך מסד הנתונים
+      const { data: qData } = await supabase.from("exam_questions").select("*");
+      if (qData) setQuestions(qData);
+
+      // 2. שליפת ההתקדמות והצבעים שמורים
+      const { data: pData } = await supabase.from("student_progress").select("*");
+      if (pData) {
+        const progressMap: Record<string, ProgressState> = {};
+        pData.forEach((p) => {
+          progressMap[p.question_id] = {
+            attempts_count: p.attempts_count,
+            is_first_try_correct: p.is_first_try_correct,
+          };
+        });
+        setProgress(progressMap);
+      }
+      setLoading(false);
+    }
+
+    loadQuestionsAndProgress();
+  }, []);
+
+  // עדכון סטטוס התשובה (נכון / לא נכון)
+  const handleAnswerSubmit = async (questionId: string, isCorrect: boolean) => {
+    const currentProgress = progress[questionId] || { attempts_count: 0, is_first_try_correct: null };
+    const newAttemptsCount = currentProgress.attempts_count + 1;
+
+    // הקביעה האם זה נכון בפעם הראשונה מתרחשת אך ורק בניסיון הראשון (attempts_count == 0)
+    const isFirstTryCorrect =
+      currentProgress.attempts_count === 0
+        ? isCorrect
+        : currentProgress.is_first_try_correct;
+
+    const updatedState = {
+      attempts_count: newAttemptsCount,
+      is_first_try_correct: isFirstTryCorrect,
+    };
+
+    // עדכון ב-State המקומי
+    setProgress((prev) => ({ ...prev, [questionId]: updatedState }));
+
+    // שמירה במסד הנתונים ב-Supabase
+    await supabase.from("student_progress").upsert({
+      question_id: questionId,
+      attempts_count: newAttemptsCount,
+      is_first_try_correct: isFirstTryCorrect,
+      updated_at: new Date().toISOString(),
+    });
+  };
+
+  // פונקציית עיצוב צבע התיבה לפי התוצאה
+  const getCardStyle = (questionId: string) => {
+    const qProgress = progress[questionId];
+    if (!qProgress || qProgress.is_first_try_correct === null) {
+      return "bg-white border-gray-200"; // ברירת מחדל - טרם נענתה
+    }
+    if (qProgress.is_first_try_correct === true) {
+      return "bg-green-50 border-2 border-green-500 text-green-900"; // 🟢 נכון מפעם ראשונה
+    }
+    return "bg-red-50 border-2 border-red-500 text-red-900"; // 🔴 לא נכון מפעם ראשונה
+  };
+
+  if (loading) return <div className="p-8 text-center dir-rtl" dir="rtl">טוען שאלות ומעקב...</div>;
+
+  return (
+    <div className="max-w-4xl mx-auto p-6 dir-rtl space-y-6" dir="rtl">
+      <div>
+        <h1 className="text-2xl font-bold text-gray-900">🎯 תרגול שאלות ומעקב הצלחה בלמידה</h1>
+        <p className="text-xs text-gray-500 mt-1">
+          תיבות יסומנו ב-🟢 ירוק אם נפתרו נכון בניסיון הראשון, וב-🔴 אדום אם הייתה טעות בניסיון הראשון.
+        </p>
+      </div>
+
+      <div className="grid grid-cols-1 gap-4">
+        {questions.map((q, idx) => {
+          const qStyle = getCardStyle(q.id);
+          const currentStatus = progress[q.id];
+
+          return (
+            <div
+              key={q.id}
+              className={`p-5 rounded-xl border transition-all shadow-sm ${qStyle}`}
+            >
+              <div className="flex justify-between items-center mb-3">
+                <span className="font-bold text-sm">שאלה {idx + 1}</span>
+                {currentStatus?.is_first_try_correct === true && (
+                  <span className="bg-green-600 text-white text-[10px] font-extrabold px-2 py-0.5 rounded-full">
+                    🟢 נפתר נכון בול בפעם הראשונה!
+                  </span>
+                )}
+                {currentStatus?.is_first_try_correct === false && (
+                  <span className="bg-red-600 text-white text-[10px] font-extrabold px-2 py-0.5 rounded-full">
+                    🔴 דורש חזרה (לא נפתר נכון בפעם הראשונה)
+                  </span>
+                )}
+              </div>
+
+              <p className="text-sm font-medium mb-4">{q.question_text}</p>
+
+              {/* אזור בדיקת תשובה */}
+              <div className="flex items-center gap-3 pt-2 border-t border-gray-200/60">
+                <span className="text-xs font-semibold">סימון תוצאת תרגול:</span>
+                <button
+                  onClick={() => handleAnswerSubmit(q.id, true)}
+                  className="bg-green-600 hover:bg-green-700 text-white text-xs font-bold px-3 py-1.5 rounded-lg transition"
+                >
+                  הצלחה (תשובה נכונה)
+                </button>
+                <button
+                  onClick={() => handleAnswerSubmit(q.id, false)}
+                  className="bg-red-600 hover:bg-red-700 text-white text-xs font-bold px-3 py-1.5 rounded-lg transition"
+                >
+                  טעות (תשובה שגויה)
+                </button>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+</file>
+
+<file path="app/layout.tsx">
+import type { Metadata } from "next";
+import "./globals.css";
+import Link from "next/link";
+
+export const metadata: Metadata = {
+  title: "SS - Study Smarter",
+  description: "מערכת למידה ותרגול חכמה המבוססת על חומרי הקורס בלבד",
+};
+
+export default function RootLayout({
+  children,
+}: {
+  children: React.ReactNode;
+}) {
+  return (
+    <html lang="he" dir="rtl">
+      <body className="bg-gray-50 min-h-screen text-gray-900 font-sans">
+        {/* סרגל ניווט ראשי (Navbar) */}
+        <header className="bg-white border-b sticky top-0 z-50 shadow-sm">
+          <div className="max-w-6xl mx-auto px-6 h-16 flex justify-between items-center">
+            {/* מותג ושם התוכנה */}
+            <Link href="/" className="flex items-center gap-2 font-extrabold text-xl text-blue-600">
+              <span className="bg-blue-600 text-white px-2.5 py-1 rounded-lg text-sm font-black shadow-sm">
+                SS
+              </span>
+              <span>Study Smarter</span>
+            </Link>
+
+            {/* קישורי ניווט */}
+            <nav className="flex items-center gap-6 text-xs font-bold text-gray-600">
+              <Link href="/setup" className="hover:text-blue-600 transition">⚙️ הקמת קורס</Link>
+              <Link href="/matrix" className="hover:text-blue-600 transition">📊 מטריצה</Link>
+              <Link href="/study/focused" className="hover:text-blue-600 transition">🎯 תרגול ממוקד</Link>
+              <Link href="/exam/simulation" className="hover:text-blue-600 transition">📝 סימולטור מבחן</Link>
+            </nav>
+          </div>
+        </header>
+
+        <main>{children}</main>
+      </body>
+    </html>
+  );
+}
+</file>
+
+<file path="lib/services/geminiService.ts">
+import { GoogleGenerativeAI, Part } from '@google/generative-ai';
+
+// Initialize Gemini - Ensure NEXT_PUBLIC_GEMINI_API_KEY is in your .env.local
+const apiKey = process.env.NEXT_PUBLIC_GEMINI_API_KEY || '';
+const genAI = new GoogleGenerativeAI(apiKey);
+
+export async function generateCourseKnowledgeMap(syllabusBuffer: Buffer, mimeType: string) {
+  if (!apiKey) throw new Error("Gemini API Key is missing.");
+
+  const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+
+  const prompt = `
+    You are an expert academic AI. Analyze the attached course syllabus and generate a hierarchical Course Knowledge Map.
+    Break down the course into main Topics. For each topic, extract specific sub-concepts and generate an Active Recall prompt (question) for self-testing.
+    
+    IMPORTANT: Respond ONLY with valid JSON. Do not include markdown formatting like \`\`\`json.
+    
+    Expected JSON schema:
+    {
+      "courseName": "String",
+      "topics": [
+        {
+          "name": "String",
+          "description": "String",
+          "concepts": [
+            {
+              "name": "String",
+              "description": "String",
+              "recallPrompt": "String (A targeted active recall question testing this concept)"
+            }
+          ]
+        }
+      ]
+    }
+  `;
+
+  const pdfPart: Part = {
+    inlineData: {
+      data: syllabusBuffer.toString("base64"),
+      mimeType
+    },
+  };
+
+  const result = await model.generateContent([prompt, pdfPart]);
+  const response = await result.response;
+  const text = response.text();
+
+  try {
+    const cleanJson = text.replace(/```json/g, '').replace(/```/g, '').trim();
+    return JSON.parse(cleanJson);
+  } catch (error) {
+    throw new Error("Failed to parse Gemini response as JSON. Raw output: " + text);
+  }
+}
+export async function extractExamQuestions(examBuffer: Buffer, mimeType: string) {
+  if (!apiKey) throw new Error("Gemini API Key is missing.");
+
+  const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+
+  const prompt = `
+    You are an expert academic AI. Analyze the attached past exam paper in detail.
+    Extract every question along with its full solution/rubric (if present).
+    Identify if the question represents a standard core question or a "trap/trick question" (שאלת פינה/מלכודת).
+
+    IMPORTANT: Respond ONLY with valid JSON. Do not include markdown formatting like \`\`\`json.
+
+    Expected JSON schema:
+    [
+      {
+        "question_text": "String",
+        "solution_text": "String or null",
+        "topic": "String",
+        "difficulty": "Easy | Medium | Hard",
+        "is_trap": true,
+        "guidance_notes": "String (Short summary of the core solving logic or trap reason in Hebrew)"
+      }
+    ]
+  `;
+
+  const pdfPart: Part = {
+    inlineData: {
+      data: examBuffer.toString("base64"),
+      mimeType
+    },
+  };
+
+  const result = await model.generateContent([prompt, pdfPart]);
+  const response = await result.response;
+  const text = response.text();
+
+  try {
+    const cleanJson = text.replace(/```json/g, '').replace(/```/g, '').trim();
+    return JSON.parse(cleanJson);
+  } catch (error) {
+    throw new Error("Failed to parse Exam AI response as JSON. Raw output: " + text);
+  }
+}
+export async function parseCourseBooklet(bookletBuffer: Buffer, mimeType: string) {
+  if (!apiKey) throw new Error("Gemini API Key is missing.");
+
+  const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+
+  const prompt = `
+    You are an expert academic AI assistant. Analyze the attached course booklet/textbook material.
+    Extract key concepts, formulas, theorems, and definitions.
+    For each item, generate a 2-sided Active Recall Flashcard:
+    - Front (recallPrompt): The question, formula identifier, or prompt asking the student to recall the material.
+    - Back (recallAnswer): The complete definition, proof summary, equation details, or explanation.
+
+    IMPORTANT: Respond ONLY with valid JSON. Do not include markdown formatting like \`\`\`json.
+
+    Expected JSON schema:
+    [
+      {
+        "conceptName": "String",
+        "itemType": "concept" | "formula" | "theorem",
+        "recallPrompt": "String (Front of card: Question or formula prompt)",
+        "recallAnswer": "String (Back of card: Full explanation, formula breakdown, or answer)",
+        "detailedExplanation": "String (Detailed contextual background or step-by-step logic)"
+      }
+    ]
+  `;
+
+  const pdfPart: Part = {
+    inlineData: {
+      data: bookletBuffer.toString("base64"),
+      mimeType
+    },
+  };
+
+  const result = await model.generateContent([prompt, pdfPart]);
+  const response = await result.response;
+  const text = response.text();
+
+  try {
+    const cleanJson = text.replace(/```json/g, '').replace(/```/g, '').trim();
+    return JSON.parse(cleanJson);
+  } catch (error) {
+    throw new Error("Failed to parse Booklet AI response as JSON. Raw output: " + text);
+  }
+}
+export async function parseExamQuestions(
+  examBuffer: Buffer,
+  mimeType: string,
+  availableTopics: { id: string; title: string }[]
+) {
+  if (!apiKey) throw new Error("Gemini API Key is missing.");
+
+  const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+
+  const topicsContext = availableTopics
+    .map((t) => `ID: "${t.id}", Title: "${t.title}"`)
+    .join("\n");
+
+  const prompt = `
+    You are an expert academic AI assistant analyzing a university exam.
+    Analyze the attached exam document and break it down into individual questions.
+
+    Available Course Topics:
+    ${topicsContext}
+
+    For each question in the exam:
+    1. Extract the question text and number.
+    2. Determine if it is a "trap" / corner-case question (isTrap: boolean).
+    3. Match the question to EXACTLY ONE topic ID from the "Available Course Topics" list above. If no topic matches closely, set topicId to null.
+    4. Provide guidance notes explaining the trap/trick (if applicable).
+    5. Provide a step-by-step solution.
+
+    IMPORTANT: Respond ONLY with valid JSON. Do not include markdown formatting like \`\`\`json.
+
+    Expected JSON schema:
+    [
+      {
+        "questionNumber": 1,
+        "questionText": "String",
+        "isTrap": true,
+        "topicId": "String (UUID from provided topics) or null",
+        "guidanceNotes": "String",
+        "solutionText": "String"
+      }
+    ]
+  `;
+
+  const pdfPart: Part = {
+    inlineData: {
+      data: examBuffer.toString("base64"),
+      mimeType,
+    },
+  };
+
+  const result = await model.generateContent([prompt, pdfPart]);
+  const response = await result.response;
+  const text = response.text();
+
+  try {
+    const cleanJson = text.replace(/```json/g, "").replace(/```/g, "").trim();
+    return JSON.parse(cleanJson);
+  } catch (error) {
+    throw new Error("Failed to parse Exam AI response as JSON. Raw output: " + text);
+  }
+}
+</file>
+
+<file path="app/setup/page.tsx">
+"use client";
+
+import { useEffect, useState } from "react";
+import { supabase } from "@/lib/supabaseClient";
+import Link from "next/link";
+
+interface Course {
+  id: string;
+  name: string;
+  code: string;
+  created_at?: string;
+}
+
+export default function SetupPage() {
+  const [courses, setCourses] = useState<Course[]>([]);
+  const [courseName, setCourseName] = useState("");
+  const [courseCode, setCourseCode] = useState("");
+  const [activeCourseId, setActiveCourseId] = useState<string | null>(null);
+
+  // קבצים
+  const [syllabusFile, setSyllabusFile] = useState<File | null>(null);
+  const [summaryFiles, setSummaryFiles] = useState<FileList | null>(null);
+
+  // מצבי טעינה והודעות
+  const [loadingCourses, setLoadingCourses] = useState(true);
+  const [creating, setCreating] = useState(false);
+  const [uploadingSyllabus, setUploadingSyllabus] = useState(false);
+  const [uploadingSummaries, setUploadingSummaries] = useState(false);
+  const [statusMessage, setStatusMessage] = useState<string | null>(null);
+
+  // שליפת כל הקורסים הקיימים במערכת
+  const fetchCourses = async () => {
+    setLoadingCourses(true);
+    const { data, error } = await supabase
+      .from("courses")
+      .select("*")
+      .order("created_at", { ascending: false });
+
+    if (!error && data) {
+      setCourses(data);
+      if (data.length > 0 && !activeCourseId) {
+        setActiveCourseId(data[0].id);
+      }
+    }
+    setLoadingCourses(false);
+  };
+
+  useEffect(() => {
+    fetchCourses();
+  }, []);
+
+  // יצירת קורס חדש
+  const handleCreateCourse = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!courseName) return;
+
+    setCreating(true);
+    setStatusMessage(null);
+
+    try {
+      const { data, error } = await supabase
+        .from("courses")
+        .insert({ name: courseName, code: courseCode })
+        .select()
+        .single();
+
+      if (error) throw error;
+
+      setStatusMessage(`✅ הקורס "${data.name}" נוצר בהצלחה!`);
+      setCourseName("");
+      setCourseCode("");
+      setActiveCourseId(data.id);
+      await fetchCourses();
+    } catch (err: any) {
+      setStatusMessage(`❌ שגיאה ביצירת הקורס: ${err.message}`);
+    } finally {
+      setCreating(false);
+    }
+  };
+
+  // העלאת סילבוס
+  const handleUploadSyllabus = async (cId: string) => {
+    if (!syllabusFile) return;
+    setUploadingSyllabus(true);
+    setStatusMessage("מנתח סילבוס ומחלץ נושאים...");
+
+    const formData = new FormData();
+    formData.append("courseId", cId);
+    formData.append("file", syllabusFile);
+
+    try {
+      const res = await fetch("/api/ingest/syllabus", { method: "POST", body: formData });
+      const data = await res.json();
+      if (data.success) {
+        setStatusMessage("✅ הסילבוס עובד ועץ הנושאים חולץ בהצלחה!");
+        setSyllabusFile(null);
+      } else {
+        setStatusMessage(`❌ שגיאה: ${data.error}`);
+      }
+    } catch {
+      setStatusMessage("❌ שגיאה בזמן עיבוד הסילבוס.");
+    } finally {
+      setUploadingSyllabus(false);
+    }
+  };
+
+  // העלאת ספר / סיכומים בכתב יד
+  const handleUploadSummaries = async (cId: string) => {
+    if (!summaryFiles || summaryFiles.length === 0) return;
+    setUploadingSummaries(true);
+    setStatusMessage("מפענח כתב יד ומאחד את ספר הקורס והסיכומים...");
+
+    const formData = new FormData();
+    formData.append("courseId", cId);
+    Array.from(summaryFiles).forEach((f) => formData.append("files", f));
+
+    try {
+      const res = await fetch("/api/ingest/summaries", { method: "POST", body: formData });
+      const data = await res.json();
+      if (data.success) {
+        setStatusMessage("✅ הסיכומים וספר הקורס פוענחו ונשמרו בהצלחה!");
+        setSummaryFiles(null);
+      } else {
+        setStatusMessage(`❌ שגיאה: ${data.error}`);
+      }
+    } catch {
+      setStatusMessage("❌ שגיאה בפענוח הסיכומים.");
+    } finally {
+      setUploadingSummaries(false);
+    }
+  };
+
+  return (
+    <div className="max-w-5xl mx-auto p-6 dir-rtl space-y-8" dir="rtl">
+      {/* כותרת ראשית */}
+      <div className="text-center space-y-1">
+        <h1 className="text-2xl font-bold text-gray-900 flex items-center justify-center gap-2">
+          ⚙️ הקמת קורס והעלאת חומרי לימוד
+        </h1>
+        <p className="text-xs text-gray-500">
+          הגדירו את הקורס והעלו סילבוס, מבחנים וסיכומים (כולל סריקות בכתב יד) לבניית מאגר הידע.
+        </p>
+      </div>
+
+      {statusMessage && (
+        <div className="p-3 bg-blue-50 border border-blue-200 rounded-xl text-xs font-semibold text-blue-900 text-center shadow-sm">
+          {statusMessage}
+        </div>
+      )}
+
+      {/* טופס יצירת קורס חדש */}
+      <div className="bg-white p-6 rounded-2xl border border-gray-200 shadow-sm space-y-4">
+        <h2 className="text-sm font-bold text-gray-800">1. פרטי הקורס</h2>
+        <form onSubmit={handleCreateCourse} className="grid grid-cols-1 md:grid-cols-3 gap-3">
+          <input
+            type="text"
+            placeholder="שם הקורס (למשל: פיזיקה)"
+            value={courseName}
+            onChange={(e) => setCourseName(e.target.value)}
+            className="p-3 border rounded-xl text-xs w-full focus:outline-none focus:ring-2 focus:ring-blue-500"
+            required
+          />
+          <input
+            type="text"
+            placeholder="מספר / קוד הקורס (למשל: 11111111111)"
+            value={courseCode}
+            onChange={(e) => setCourseCode(e.target.value)}
+            className="p-3 border rounded-xl text-xs w-full focus:outline-none focus:ring-2 focus:ring-blue-500"
+          />
+          <button
+            type="submit"
+            disabled={creating}
+            className="bg-blue-600 hover:bg-blue-700 disabled:bg-gray-300 text-white font-bold text-xs rounded-xl p-3 transition shadow-md"
+          >
+            {creating ? "יוצר קורס..." : "צור קורס חדש"}
+          </button>
+        </form>
+      </div>
+
+      {/* רשימת הקורסים שהוקמו במערכת */}
+      <div className="space-y-6">
+        <h2 className="text-lg font-bold text-gray-900 border-b pb-2">
+          📚 הקורסים הפעילים במערכת ({courses.length})
+        </h2>
+
+        {loadingCourses ? (
+          <div className="text-center py-8 text-xs text-gray-500">טוען קורסים...</div>
+        ) : courses.length === 0 ? (
+          <div className="text-center p-8 bg-gray-50 rounded-2xl border text-xs text-gray-500">
+            עדיין לא הוקמו קורסים. הזיני שם ומספר קורס למעלה ולחצי "צור קורס חדש".
+          </div>
+        ) : (
+          courses.map((course) => {
+            const isExpanded = activeCourseId === course.id;
+
+            return (
+              <div
+                key={course.id}
+                className={`bg-white rounded-2xl border transition-all shadow-sm overflow-hidden ${
+                  isExpanded ? "border-blue-500 ring-2 ring-blue-100" : "border-gray-200"
+                }`}
+              >
+                {/* כותרת התיבה: שם הקורס - מספר הקורס */}
+                <div
+                  onClick={() => setActiveCourseId(isExpanded ? null : course.id)}
+                  className="p-5 bg-gradient-to-r from-blue-50/40 to-white flex justify-between items-center cursor-pointer hover:bg-blue-50/60 transition"
+                >
+                  <div className="flex items-center gap-3">
+                    <span className="text-xl">📖</span>
+                    <div>
+                      <h3 className="text-base font-extrabold text-gray-900">
+                        {course.name} {course.code ? `- ${course.code}` : ""}
+                      </h3>
+                      <p className="text-[11px] text-gray-500 mt-0.5">
+                        מזהה קורס: {course.id.slice(0, 8)}...
+                      </p>
+                    </div>
+                  </div>
+                  <span className="text-xs font-bold text-blue-600 bg-white border px-3 py-1.5 rounded-xl shadow-sm">
+                    {isExpanded ? "סגור חומרים ▲" : "נהל קורס וחלץ חומרים ▼"}
+                  </span>
+                </div>
+
+                {/* תוכן התיבה - העלאות וגישה לכל הפיצ'רים */}
+                {isExpanded && (
+                  <div className="p-6 border-t space-y-6 bg-gray-50/30">
+                    {/* סרגל קישורים מהירים לפיצ'רים של הקורס */}
+                    <div>
+                      <span className="text-xs font-bold text-gray-700 block mb-2">
+                        🚀 פעולות ותרגול עבור קורס זה:
+                      </span>
+                      <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                        <Link
+                          href={`/matrix?courseId=${course.id}`}
+                          className="bg-white border hover:border-blue-500 p-2.5 rounded-xl text-center text-xs font-bold text-gray-800 shadow-sm transition"
+                        >
+                          📊 מטריצת שכיחות
+                        </Link>
+                        <Link
+                          href={`/study/focused?courseId=${course.id}`}
+                          className="bg-white border hover:border-blue-500 p-2.5 rounded-xl text-center text-xs font-bold text-gray-800 shadow-sm transition"
+                        >
+                          🎯 תרגול ממוקד
+                        </Link>
+                        <Link
+                          href={`/exam/simulation?courseId=${course.id}`}
+                          className="bg-white border hover:border-blue-500 p-2.5 rounded-xl text-center text-xs font-bold text-gray-800 shadow-sm transition"
+                        >
+                          📝 סימולטור מבחן
+                        </Link>
+                        <Link
+                          href={`/flashcards?courseId=${course.id}`}
+                          className="bg-white border hover:border-blue-500 p-2.5 rounded-xl text-center text-xs font-bold text-gray-800 shadow-sm transition"
+                        >
+                          🎴 פלאשקארטס
+                        </Link>
+                      </div>
+                    </div>
+
+                    {/* טפסי העלאת חומרים לקורס הספציפי הזה */}
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4 pt-2">
+                      {/* העלאת סילבוס */}
+                      <div className="bg-white p-4 rounded-xl border space-y-3">
+                        <h4 className="text-xs font-bold text-gray-800">📄 העלאת סילבוס (חילוץ נושאים)</h4>
+                        <input
+                          type="file"
+                          accept="application/pdf"
+                          onChange={(e) => setSyllabusFile(e.target.files?.[0] || null)}
+                          className="block w-full text-[11px] text-gray-500 file:mr-2 file:py-1.5 file:px-3 file:rounded-lg file:border-0 file:text-xs file:font-semibold file:bg-blue-50 file:text-blue-700"
+                        />
+                        <button
+                          onClick={() => handleUploadSyllabus(course.id)}
+                          disabled={uploadingSyllabus || !syllabusFile}
+                          className="w-full bg-gray-900 hover:bg-gray-800 disabled:bg-gray-300 text-white font-bold text-xs py-2 rounded-lg transition"
+                        >
+                          {uploadingSyllabus ? "מנתח..." : "עבד סילבוס"}
+                        </button>
+                      </div>
+
+                      {/* העלאת ספר קורס / סיכומים בכתב יד */}
+                      <div className="bg-white p-4 rounded-xl border space-y-3">
+                        <h4 className="text-xs font-bold text-gray-800">✍️ העלאת ספר/סיכומים בכתב יד</h4>
+                        <input
+                          type="file"
+                          multiple
+                          accept="application/pdf,image/*"
+                          onChange={(e) => setSummaryFiles(e.target.files)}
+                          className="block w-full text-[11px] text-gray-500 file:mr-2 file:py-1.5 file:px-3 file:rounded-lg file:border-0 file:text-xs file:font-semibold file:bg-blue-50 file:text-blue-700"
+                        />
+                        <button
+                          onClick={() => handleUploadSummaries(course.id)}
+                          disabled={uploadingSummaries || !summaryFiles}
+                          className="w-full bg-blue-600 hover:bg-blue-700 disabled:bg-gray-300 text-white font-bold text-xs py-2 rounded-lg transition"
+                        >
+                          {uploadingSummaries ? "מפענח..." : "העלה ופענח סיכומים"}
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                )}
+              </div>
+            );
+          })
+        )}
+      </div>
+    </div>
+  );
+}
+</file>
+
+</files>

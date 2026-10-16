@@ -1,122 +1,130 @@
-"use client";
+'use client';
 
-import { useEffect, useState } from "react";
-import { getCourseMatrixAndAnalytics, MatrixAnalyticsResult } from "@/lib/services/analyticsService";
-import { supabase } from "@/lib/supabaseClient";
+import { useState, useEffect } from 'react';
+import Link from 'next/link';
 
-export default function MatrixPage() {
-  const [data, setData] = useState<MatrixAnalyticsResult | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [courseId, setCourseId] = useState<string | null>(null);
+export default function TopicMatrixPage() {
+  const [matrixData, setMatrixData] = useState<any>(null);
 
   useEffect(() => {
-    async function init() {
-      // שליפת הקורס הפילי
-      const { data: courses } = await supabase.from("courses").select("id").limit(1);
-      if (courses && courses.length > 0) {
-        setCourseId(courses[0].id);
-        const matrixData = await getCourseMatrixAndAnalytics(courses[0].id);
-        setData(matrixData);
-      }
-      setLoading(false);
-    }
-    init();
+    setMatrixData({
+      exams: [
+        { id: 'e1', title: '2023 Sem A Moed A' },
+        { id: 'e2', title: '2022 Sem B Midterm' }
+      ],
+      topics: [
+        { id: 't1', name: 'Derivatives & Limits' },
+        { id: 't2', name: 'Integrals & Area' }
+      ],
+      questions: [
+        { id: 'q1', q_number: 1, exam_id: 'e1', topic_id: 't1', first_try_correct: true, total_attempts: 1 },
+        { id: 'q2', q_number: 3, exam_id: 'e1', topic_id: 't1', first_try_correct: false, total_attempts: 2, latest_correct: true },
+        { id: 'q3', q_number: 2, exam_id: 'e2', topic_id: 't2', first_try_correct: null, total_attempts: 0 }
+      ]
+    });
   }, []);
 
-  if (loading) {
-    return <div className="p-8 text-center dir-rtl" dir="rtl">טוען את הטבלה המצליבה...</div>;
-  }
-
-  if (!data || data.matrixRows.length === 0) {
+  if (!matrixData) {
     return (
-      <div className="p-8 text-center dir-rtl" dir="rtl">
-        <h2 className="text-xl font-bold">לא נמצאו נתונים</h2>
-        <p className="text-gray-500 text-sm mt-2">יש להעלות סילבוס ומבחנים במסך ה-Setup תחילה.</p>
+      <div className="min-h-[60vh] flex items-center justify-center">
+        <div className="text-slate-400 font-medium animate-pulse">Loading Knowledge Matrix...</div>
       </div>
     );
   }
 
+  const getQuestionStyle = (q: any) => {
+    if (q.first_try_correct === true) {
+      return 'bg-emerald-50 text-emerald-700 border-emerald-200/80 shadow-2xs';
+    }
+    if (q.first_try_correct === false && q.latest_correct && q.total_attempts > 1) {
+      return 'bg-amber-50 text-amber-700 border-amber-200/80 shadow-2xs';
+    }
+    return 'bg-slate-100 text-slate-600 border-slate-200/80';
+  };
+
   return (
-    <div className="max-w-7xl mx-auto p-6 dir-rtl" dir="rtl">
-      <div className="mb-6">
-        <h1 className="text-2xl font-bold text-gray-900">📊 מטריצה מצליבה: נושאים מול מועדי מבחנים</h1>
-        <p className="text-xs text-gray-500 mt-1">
-          הטבלה מציגה את השאלות המדויקות מכל מועד ומזהה אוטומטית נושאי חובה המופיעים באופן קבוע במבחנים.
-        </p>
+    <div className="max-w-7xl mx-auto pt-8 px-4 sm:px-6 lg:px-8 space-y-6">
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+        <div>
+          <h1 className="text-2xl sm:text-3xl font-bold text-slate-900 tracking-tight">Topic Mastery Matrix</h1>
+          <p className="text-slate-500 text-sm mt-1">
+            Click on any topic row to start practicing its questions.
+          </p>
+        </div>
+
+        <div className="flex items-center gap-4 bg-white px-4 py-2.5 rounded-2xl border border-slate-200/80 text-xs font-medium text-slate-600 shadow-2xs">
+          <span className="flex items-center gap-1.5">
+            <span className="w-2.5 h-2.5 rounded-full bg-emerald-500"></span> 1st Try Correct
+          </span>
+          <span className="flex items-center gap-1.5">
+            <span className="w-2.5 h-2.5 rounded-full bg-amber-500"></span> Retried Correct
+          </span>
+          <span className="flex items-center gap-1.5">
+            <span className="w-2.5 h-2.5 rounded-full bg-slate-300"></span> Unsolved
+          </span>
+        </div>
       </div>
 
-      <div className="overflow-x-auto bg-white rounded-xl border shadow-sm">
-        <table className="w-full text-sm text-right border-collapse">
-          <thead>
-            <tr className="bg-gray-100 border-b text-gray-700">
-              <th className="p-4 border-l font-bold min-w-[220px]">נושא בסילבוס</th>
-              <th className="p-4 border-l font-bold text-center w-28">שכיחות</th>
-              {data.exams.map((exam) => (
-                <th key={exam.id} className="p-4 border-l font-bold text-center min-w-[120px]">
-                  {exam.year} {exam.term}
-                </th>
-              ))}
-            </tr>
-          </thead>
-          <tbody>
-            {data.matrixRows.map((row) => (
-              <tr
-                key={row.topicId}
-                className={`border-b hover:bg-gray-50 transition-colors ${
-                  row.isMandatory ? "bg-red-50/40" : ""
-                }`}
-              >
-                {/* שם הנושא ותגית נושא חובה */}
-                <td className="p-4 border-l">
-                  <div className="font-bold text-gray-800">{row.topicTitle}</div>
-                  {row.isMandatory && (
-                    <span className="inline-block mt-1 bg-red-600 text-white text-[10px] font-extrabold px-2 py-0.5 rounded-full">
-                      🔥 נושא חובה במבחנים (סבירות גבוהה)
-                    </span>
-                  )}
-                </td>
-
-                {/* אחוז שכיחות */}
-                <td className="p-4 border-l text-center font-bold">
-                  <span
-                    className={`inline-block px-2.5 py-1 rounded-full text-xs ${
-                      row.isMandatory
-                        ? "bg-red-100 text-red-800"
-                        : row.appearancePercentage >= 50
-                        ? "bg-yellow-100 text-yellow-800"
-                        : "bg-gray-100 text-gray-600"
-                    }`}
-                  >
-                    {row.appearancePercentage}%
-                  </span>
-                </td>
-
-                {/* שאלות לפי מועדים */}
-                {data.exams.map((exam) => {
-                  const qNumbers = row.examQuestionsMap[exam.id];
-                  return (
-                    <td key={exam.id} className="p-4 border-l text-center">
-                      {qNumbers && qNumbers.length > 0 ? (
-                        <div className="flex flex-wrap gap-1 justify-center">
-                          {qNumbers.map((qNum) => (
-                            <span
-                              key={qNum}
-                              className="bg-blue-100 text-blue-900 border border-blue-200 font-semibold px-2 py-0.5 rounded text-xs"
-                            >
-                              שאלה {qNum}
-                            </span>
-                          ))}
-                        </div>
-                      ) : (
-                        <span className="text-gray-300 text-xs">—</span>
-                      )}
-                    </td>
-                  );
-                })}
+      <div className="bg-white rounded-2xl border border-slate-200/80 shadow-xs overflow-hidden">
+        <div className="overflow-x-auto">
+          <table className="w-full border-collapse text-left">
+            <thead>
+              <tr className="bg-slate-50/80 border-b border-slate-200/80 text-xs uppercase tracking-wider text-slate-500 font-semibold">
+                <th className="p-4 sm:p-5 w-64">Topics</th>
+                {matrixData.exams.map((exam: any) => (
+                  <th key={exam.id} className="p-4 sm:p-5 text-center min-w-[160px]">
+                    {exam.title}
+                  </th>
+                ))}
               </tr>
-            ))}
-          </tbody>
-        </table>
+            </thead>
+            <tbody className="divide-y divide-slate-100 text-sm">
+              {matrixData.topics.map((topic: any) => {
+                const topicQuestions = matrixData.questions.filter((q: any) => q.topic_id === topic.id);
+                const isTopicMastered = topicQuestions.length > 0 && topicQuestions.every((q: any) => q.first_try_correct === true);
+
+                return (
+                  <tr key={topic.id} className="hover:bg-slate-50/50 transition-colors">
+                    <td className={`p-4 sm:p-5 font-medium transition-colors ${isTopicMastered ? 'bg-emerald-50/60 text-emerald-950' : 'text-slate-800'}`}>
+                      <Link 
+                        href={`/simulation?topicId=${topic.id}`} 
+                        className="group inline-flex items-center gap-2 hover:text-indigo-600 transition-colors"
+                      >
+                        <span>{topic.name}</span>
+                        <span className="text-slate-400 group-hover:translate-x-1 transition-transform text-xs">→</span>
+                      </Link>
+                    </td>
+
+                    {matrixData.exams.map((exam: any) => {
+                      const cellQuestions = topicQuestions.filter((q: any) => q.exam_id === exam.id);
+
+                      return (
+                        <td key={exam.id} className="p-4 sm:p-5 text-center align-middle">
+                          {cellQuestions.length > 0 ? (
+                            <div className="flex flex-wrap items-center justify-center gap-1.5">
+                              {cellQuestions.map((q: any, idx: number) => (
+                                <span key={q.id} className="inline-flex items-center">
+                                  <span className={`px-2.5 py-1 text-xs font-semibold rounded-lg border ${getQuestionStyle(q)}`}>
+                                    Q{q.q_number}
+                                  </span>
+                                  {idx < cellQuestions.length - 1 && (
+                                    <span className="ml-1 text-xs font-normal text-slate-400">and</span>
+                                  )}
+                                </span>
+                              ))}
+                            </div>
+                          ) : (
+                            <span className="text-slate-300 font-light">—</span>
+                          )}
+                        </td>
+                      );
+                    })}
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
       </div>
     </div>
   );

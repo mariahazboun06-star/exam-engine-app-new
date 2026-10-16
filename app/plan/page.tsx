@@ -1,151 +1,130 @@
-"use client";
+'use client';
 
-import { useState } from "react";
-import { supabase } from "@/lib/supabaseClient";
+import { useState, useEffect } from 'react';
+import ExamDayScreen from '@/app/components/ExamDayScreen';
 
-interface DailyTask {
-  day: number;
-  dateStr: string;
-  focusTopics: string[];
-  recallConceptsCount: number;
-  trapQuestionsCount: number;
-  estimatedHours: number;
-}
+export default function StudyPlannerPage() {
+  const [examDate, setExamDate] = useState<string | null>(null);
+  const [daysUntilExam, setDaysUntilExam] = useState<number | null>(null);
+  const [unlockedStudy, setUnlockedStudy] = useState(false);
+  const [feedback, setFeedback] = useState<string | null>(null);
 
-export default function PlanPage() {
-  const [examDate, setExamDate] = useState("");
-  const [dailyHours, setDailyHours] = useState(4);
-  const [schedule, setSchedule] = useState<DailyTask[]>([]);
-  const [loading, setLoading] = useState(false);
+  const currentUser = { id: 'user-123' };
+  const currentDailyQuestion = {
+    id: 'q-2',
+    text: 'What is 5 x 5?',
+    options: ['10', '20', '25', '30'],
+    correctAnswer: '25',
+    mastery_level: 2
+  };
 
-  async function generatePlan() {
-    if (!examDate) {
-      alert("נא לבחור תאריך בחינה");
-      return;
+  useEffect(() => {
+    const fetchedDate = "2026-11-15"; 
+    setExamDate(fetchedDate);
+
+    if (fetchedDate) {
+      const today = new Date();
+      today.setHours(0, 0, 0, 0); 
+      const targetDate = new Date(fetchedDate);
+      targetDate.setHours(0, 0, 0, 0);
+
+      const timeDiff = targetDate.getTime() - today.getTime();
+      const days = Math.ceil(timeDiff / (1000 * 3600 * 24));
+      setDaysUntilExam(days);
     }
+  }, []);
 
-    setLoading(true);
+  async function handleDailyReviewAnswer(selectedOption: string) {
+    const isCorrect = selectedOption === currentDailyQuestion.correctAnswer;
+    setFeedback(isCorrect ? "Correct!" : "Incorrect.");
 
-    // 1. שליפת מושגים הדורשים חזרה (אדום/צהוב) ושאלות מלכודת
-    const [{ data: concepts }, { data: traps }] = await Promise.all([
-      supabase.from("course_concepts").select("*").in("status_color", ["red", "yellow"]),
-      supabase.from("exam_questions").select("*").eq("is_trap", true),
-    ]);
-
-    const activeConcepts = concepts || [];
-    const activeTraps = traps || [];
-
-    // 2. חישוב הימים שנשארו עד הבחינה
-    const today = new Date();
-    const target = new Date(examDate);
-    const diffTime = Math.max(target.getTime() - today.getTime(), 0);
-    const totalDays = Math.max(Math.ceil(diffTime / (1000 * 60 * 60 * 24)), 1);
-
-    // 3. חלוקת העומס על פני הימים
-    const conceptsPerDay = Math.ceil(activeConcepts.length / totalDays);
-    const trapsPerDay = Math.ceil(activeTraps.length / totalDays);
-
-    const generatedSchedule: DailyTask[] = [];
-
-    for (let i = 0; i < totalDays; i++) {
-      const currentDate = new Date();
-      currentDate.setDate(today.getDate() + i);
-
-      const dayConcepts = activeConcepts.slice(i * conceptsPerDay, (i + 1) * conceptsPerDay);
-      const dayTraps = activeTraps.slice(i * trapsPerDay, (i + 1) * trapsPerDay);
-
-      const topicNames = Array.from(
-        new Set(dayConcepts.map((c) => c.concept_name))
-      ).slice(0, 3);
-
-      generatedSchedule.push({
-        day: i + 1,
-        dateStr: currentDate.toLocaleDateString("he-IL", {
-          weekday: "short",
-          month: "numeric",
-          day: "numeric",
-        }),
-        focusTopics: topicNames.length > 0 ? topicNames : ["חזרה כללית וסימולציות"],
-        recallConceptsCount: dayConcepts.length,
-        trapQuestionsCount: dayTraps.length,
-        estimatedHours: Math.min(dailyHours, Math.max(2, dayConcepts.length * 0.5)),
+    try {
+      await fetch('/api/study/progress', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          userId: currentUser.id,
+          questionId: currentDailyQuestion.id,
+          currentLevel: currentDailyQuestion.mastery_level || 1,
+          isCorrect: isCorrect,
+          examDate: examDate
+        })
       });
+    } catch (error) {
+      console.error("Failed to update progress", error);
     }
+  }
 
-    setSchedule(generatedSchedule);
-    setLoading(false);
+  if (daysUntilExam === 0 && !unlockedStudy) {
+    return <ExamDayScreen onUnlockStudy={() => setUnlockedStudy(true)} />;
+  }
+
+  if (unlockedStudy) {
+    return (
+      <div className="max-w-4xl mx-auto pt-8 px-4 space-y-6">
+        <div className="bg-indigo-50 border border-indigo-200/80 text-indigo-900 p-5 rounded-2xl text-sm leading-relaxed">
+          <strong className="font-semibold block mb-1">Free Review Mode Active</strong>
+          The algorithm is taking the day off. Browse your notes, summaries, and course maps at your own pace without pressure or timer scores.
+        </div>
+        
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+          <a href="/matrix" className="p-6 bg-white rounded-2xl border border-slate-200/80 shadow-xs hover:border-indigo-400 transition block group">
+            <h3 className="text-lg font-bold text-slate-900 group-hover:text-indigo-600 transition-colors">Topic Matrix</h3>
+            <p className="text-slate-500 text-sm mt-1">Look over core concepts and exam breakdown across topics.</p>
+          </a>
+          
+          <a href="/simulation" className="p-6 bg-white rounded-2xl border border-slate-200/80 shadow-xs hover:border-indigo-400 transition block group">
+            <h3 className="text-lg font-bold text-slate-900 group-hover:text-indigo-600 transition-colors">Course Simulations</h3>
+            <p className="text-slate-500 text-sm mt-1">Freely review practice questions at your leisure.</p>
+          </a>
+        </div>
+      </div>
+    );
   }
 
   return (
-    <div className="max-w-4xl mx-auto p-6 dir-rtl" dir="rtl">
-      <h1 className="text-2xl font-bold mb-2">מחולל לוח הזמנים החכם ללמידה</h1>
-      <p className="text-sm text-gray-600 mb-6">
-        בניית לו"ז אופטימלי המבוסס על תאריך המבחן, רמת השליטה במושגים (Active Recall) ושאלות מלכודת.
-      </p>
-
-      {/* טופס אילוצים */}
-      <div className="bg-white p-6 rounded-lg border shadow-sm mb-8 grid grid-cols-1 md:grid-cols-3 gap-4 items-end">
+    <div className="max-w-4xl mx-auto pt-8 px-4 space-y-6">
+      <div className="flex items-center justify-between">
         <div>
-          <label className="block text-xs font-bold text-gray-700 mb-1">תאריך הבחינה:</label>
-          <input
-            type="date"
-            value={examDate}
-            onChange={(e) => setExamDate(e.target.value)}
-            className="w-full border rounded p-2 text-sm"
-          />
+          <h1 className="text-2xl sm:text-3xl font-bold text-slate-900 tracking-tight">Daily Study Planner</h1>
+          <p className="text-slate-500 text-sm mt-1">Your spaced repetition schedule for today.</p>
         </div>
-
-        <div>
-          <label className="block text-xs font-bold text-gray-700 mb-1">שעות לימוד זמינות ביום:</label>
-          <input
-            type="number"
-            min="1"
-            max="12"
-            value={dailyHours}
-            onChange={(e) => setDailyHours(Number(e.target.value))}
-            className="w-full border rounded p-2 text-sm"
-          />
-        </div>
-
-        <button
-          onClick={generatePlan}
-          disabled={loading}
-          className="bg-blue-600 text-white py-2 px-4 rounded font-semibold text-sm hover:bg-blue-700 disabled:opacity-50"
-        >
-          {loading ? "מחשב תוכנית..." : "צור תוכנית לימודית 📅"}
-        </button>
-      </div>
-
-      {/* הצגת לוח הזמנים */}
-      {schedule.length > 0 && (
-        <div className="space-y-4">
-          <h2 className="text-lg font-bold">תוכנית עבודה יומית מוצעת</h2>
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            {schedule.map((task) => (
-              <div key={task.day} className="bg-white p-5 rounded-lg border shadow-sm space-y-3">
-                <div className="flex justify-between items-center border-b pb-2">
-                  <span className="font-bold text-blue-900">יום {task.day} ({task.dateStr})</span>
-                  <span className="text-xs bg-gray-100 text-gray-700 px-2 py-0.5 rounded">
-                    ⏱️ כ-{task.estimatedHours} שעות
-                  </span>
-                </div>
-
-                <div>
-                  <h4 className="text-xs font-bold text-gray-500">מיקוד עיקרי:</h4>
-                  <p className="text-sm font-semibold text-gray-800">
-                    {task.focusTopics.join(", ")}
-                  </p>
-                </div>
-
-                <div className="flex gap-4 text-xs pt-1 border-t text-gray-600">
-                  <span>🎴 {task.recallConceptsCount} מושגי Active Recall</span>
-                  <span>🔥 {task.trapQuestionsCount} שאלות פינה/מלכודת</span>
-                </div>
-              </div>
-            ))}
+        {daysUntilExam !== null && (
+          <div className="bg-indigo-50 text-indigo-700 px-4 py-2 rounded-2xl font-bold text-sm border border-indigo-100">
+            {daysUntilExam} Days Left
           </div>
+        )}
+      </div>
+      
+      <div className="bg-white p-6 sm:p-8 rounded-2xl border border-slate-200/80 shadow-xs space-y-6">
+        <span className="text-xs font-bold uppercase tracking-wider text-indigo-600 bg-indigo-50 px-3 py-1 rounded-full">
+          Daily Review Question
+        </span>
+        
+        <h3 className="text-lg font-medium text-slate-800">{currentDailyQuestion.text}</h3>
+        
+        <div className="space-y-3">
+          {currentDailyQuestion.options.map((option: string) => (
+            <button 
+              key={option}
+              onClick={() => handleDailyReviewAnswer(option)}
+              className="w-full text-left p-4 border border-slate-200 rounded-xl hover:border-indigo-500 hover:bg-indigo-50/50 transition-all text-sm font-medium text-slate-700"
+            >
+              {option}
+            </button>
+          ))}
         </div>
-      )}
+
+        {feedback && (
+          <div className={`p-4 rounded-xl border text-sm font-semibold ${
+            feedback.includes("Correct") 
+              ? "bg-emerald-50 text-emerald-800 border-emerald-200" 
+              : "bg-rose-50 text-rose-800 border-rose-200"
+          }`}>
+            {feedback}
+          </div>
+        )}
+      </div>
     </div>
   );
 }
