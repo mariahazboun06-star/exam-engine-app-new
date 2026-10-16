@@ -1,6 +1,30 @@
 export type Language = 'he' | 'en';
 
-export const translations = {
+export type TranslationKey = 
+  | 'brandName'
+  | 'navPlan'
+  | 'navMatrix'
+  | 'navSimulation'
+  | 'navUpload'
+  | 'navMyCourses'
+  | 'loginTitle'
+  | 'signupTitle'
+  | 'loginSubtitle'
+  | 'signupSubtitle'
+  | 'emailLabel'
+  | 'passwordLabel'
+  | 'submitLogin'
+  | 'submitSignup'
+  | 'toggleSignup'
+  | 'toggleLogin'
+  | 'matrixTitle'
+  | 'matrixSubtitle'
+  | 'syllabusTopic'
+  | 'solvedSuccess'
+  | 'needsReview'
+  | 'noQuestion';
+
+export const translations: Record<Language, Record<TranslationKey, string>> = {
   he: {
     brandName: 'Study Smarter',
     navPlan: 'תוכנית לימודים',

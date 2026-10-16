@@ -2,7 +2,7 @@
 
 import { useState, useEffect } from 'react';
 import Link from 'next/link';
-import { useLanguage } from '@/context/LanguageContext';
+import { useLanguage } from '@/app/context/LanguageContext';
 
 export default function TopicMatrixPage() {
   const { t, dir } = useLanguage();
@@ -95,4 +95,49 @@ export default function TopicMatrixPage() {
                 return (
                   <tr key={topic.id} className="hover:bg-slate-50 transition-colors">
                     {/* Syllabus Topic Title */}
-                    <td className="p-3 font-medium text-slate-900 border-l border-slate
+                    <td className="p-3 font-medium text-slate-900 border-l border-slate-200 text-start">
+                      <Link 
+                        href={`/simulation?topicId=${topic.id}`}
+                        className="hover:text-indigo-600 hover:underline transition-all block"
+                      >
+                        {topic.num}. {topic.name}
+                      </Link>
+                    </td>
+
+                    {/* Exam Columns */}
+                    {matrixData.exams.map((exam: any) => {
+                      const topicQuestions = matrixData.questions.filter(
+                        (q: any) => q.topic_id === topic.id && q.exam_id === exam.id
+                      );
+
+                      const hasQuestions = topicQuestions.length > 0;
+                      const isMastered = hasQuestions && topicQuestions.every((q: any) => q.status === 'correct');
+
+                      return (
+                        <td 
+                          key={exam.id} 
+                          className={`p-3 text-center font-bold border-l border-slate-200 transition-colors ${
+                            isMastered 
+                              ? 'bg-emerald-600 text-white' 
+                              : hasQuestions 
+                              ? 'bg-amber-100 text-amber-900' 
+                              : 'text-slate-400'
+                          }`}
+                        >
+                          {hasQuestions 
+                            ? topicQuestions.map((q: any) => q.q_number).join(', ')
+                            : '—'
+                          }
+                        </td>
+                      );
+                    })}
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  );
+}

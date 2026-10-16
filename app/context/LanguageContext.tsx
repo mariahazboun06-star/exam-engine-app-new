@@ -1,13 +1,13 @@
 'use client';
 
 import React, { createContext, useContext, useState, useEffect } from 'react';
-import { translations, Language } from '@/lib/translations';
+import { translations, Language, TranslationKey } from '@/lib/translations';
 
 interface LanguageContextType {
   lang: Language;
   dir: 'rtl' | 'ltr';
   toggleLanguage: () => void;
-  t: (key: keyof typeof translations['he']) => string;
+  t: (key: TranslationKey) => string;
 }
 
 const LanguageContext = createContext<LanguageContextType | undefined>(undefined);
@@ -17,7 +17,7 @@ export function LanguageProvider({ children }: { children: React.ReactNode }) {
 
   useEffect(() => {
     const savedLang = localStorage.getItem('app_lang') as Language;
-    if (savedLang && (savedLang === 'he' || savedLang === 'en')) {
+    if (savedLang === 'he' || savedLang === 'en') {
       setLang(savedLang);
     }
   }, []);
@@ -32,8 +32,8 @@ export function LanguageProvider({ children }: { children: React.ReactNode }) {
     setLang((prev) => (prev === 'he' ? 'en' : 'he'));
   };
 
-  const t = (key: keyof typeof translations['he']) => {
-    return translations[lang]?.[key] || translations['he'][key] || key;
+  const t = (key: TranslationKey): string => {
+    return translations[lang][key] || translations['he'][key] || key;
   };
 
   return (
