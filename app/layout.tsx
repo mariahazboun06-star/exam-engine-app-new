@@ -1,6 +1,6 @@
 import type { Metadata } from 'next';
 import Navbar from '@/app/components/Navbar';
-import { LanguageProvider } from '@/context/LanguageContext';
+import { LanguageProvider } from '@/app/context/LanguageContext';
 import './globals.css';
 
 export const metadata: Metadata = {

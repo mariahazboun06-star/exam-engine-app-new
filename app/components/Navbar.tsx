@@ -2,7 +2,7 @@
 
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
-import { useLanguage } from '@/context/LanguageContext';
+import { useLanguage } from '@/app/context/LanguageContext';
 
 export default function Navbar() {
   const pathname = usePathname();
@@ -29,13 +29,13 @@ export default function Navbar() {
             <span>{t('brandName')}</span>
           </Link>
 
-          {/* Nav Items & Language Toggle */}
+          {/* Nav Items & Language Switcher */}
           <div className="flex items-center gap-2">
             {!isDashboard && (
               <nav className="flex items-center gap-1 sm:gap-2">
                 <Link
                   href="/dashboard"
-                  className="px-3 py-1.5 rounded-xl text-sm font-medium text-slate-600 hover:text-slate-900 hover:bg-slate-100 transition-all ltr:mr-2 rtl:ml-2 border-slate-200"
+                  className="px-3 py-1.5 rounded-xl text-sm font-medium text-slate-600 hover:text-slate-900 hover:bg-slate-100 transition-all mr-2 border-r border-slate-200 pr-4"
                 >
                   {t('navMyCourses')}
                 </Link>
@@ -48,7 +48,7 @@ export default function Navbar() {
                       href={item.href}
                       className={`px-3 py-1.5 rounded-xl text-sm font-medium transition-all ${
                         isActive
-                          ? 'bg-indigo-50 text-indigo-600 font-semibold'
+                          ? 'bg-indigo-50 text-indigo-600 font-semibold shadow-2xs'
                           : 'text-slate-600 hover:text-slate-900 hover:bg-slate-100'
                       }`}
                     >
@@ -62,7 +62,7 @@ export default function Navbar() {
             {/* Language Switch Button */}
             <button
               onClick={toggleLanguage}
-              className="ml-2 px-3 py-1.5 rounded-xl border border-slate-200 bg-white text-xs font-bold text-slate-700 hover:bg-slate-50 transition-all flex items-center gap-1.5 shadow-2xs"
+              className="px-3 py-1.5 rounded-xl border border-slate-200 bg-white text-xs font-bold text-slate-700 hover:bg-slate-50 transition-all flex items-center gap-1.5 shadow-2xs"
             >
               <span>🌐</span>
               <span>{lang === 'he' ? 'English' : 'עברית'}</span>
