@@ -2,60 +2,72 @@
 
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
+import { useLanguage } from '@/context/LanguageContext';
 
 export default function Navbar() {
   const pathname = usePathname();
+  const { lang, toggleLanguage, t } = useLanguage();
 
-  // Hide course-specific actions on global/dashboard pages
   const isDashboard = pathname === '/dashboard' || pathname === '/';
 
   const navItems = [
-    { name: 'Study Plan', href: '/plan' },
-    { name: 'Topic Matrix', href: '/matrix' },
-    { name: 'Simulation', href: '/simulation' },
-    { name: 'Upload Exam', href: '/upload-exam' },
+    { name: t('navPlan'), href: '/plan' },
+    { name: t('navMatrix'), href: '/matrix' },
+    { name: t('navSimulation'), href: '/simulation' },
+    { name: t('navUpload'), href: '/upload-exam' },
   ];
 
   return (
     <header className="sticky top-0 z-50 backdrop-blur-md bg-white/80 border-b border-slate-200/80">
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
         <div className="flex items-center justify-between h-16">
-          {/* Logo / Brand */}
+          {/* Logo */}
           <Link href="/dashboard" className="flex items-center gap-2.5 font-bold text-xl text-slate-900 tracking-tight">
             <span className="flex items-center justify-center px-2 py-1 rounded-xl bg-indigo-600 text-white font-black text-xs shadow-sm shadow-indigo-200">
               SS
             </span>
-            <span>Study Smarter</span>
+            <span>{t('brandName')}</span>
           </Link>
 
-          {/* Navigation Items - Only visible when inside a specific course view */}
-          {!isDashboard && (
-            <nav className="flex items-center gap-1 sm:gap-2">
-              <Link
-                href="/dashboard"
-                className="px-3.5 py-2 rounded-xl text-sm font-medium text-slate-600 hover:text-slate-900 hover:bg-slate-100/80 transition-all mr-2 border-r border-slate-200 pr-4"
-              >
-                ← My Courses
-              </Link>
+          {/* Nav Items & Language Toggle */}
+          <div className="flex items-center gap-2">
+            {!isDashboard && (
+              <nav className="flex items-center gap-1 sm:gap-2">
+                <Link
+                  href="/dashboard"
+                  className="px-3 py-1.5 rounded-xl text-sm font-medium text-slate-600 hover:text-slate-900 hover:bg-slate-100 transition-all ltr:mr-2 rtl:ml-2 border-slate-200"
+                >
+                  {t('navMyCourses')}
+                </Link>
 
-              {navItems.map((item) => {
-                const isActive = pathname.startsWith(item.href);
-                return (
-                  <Link
-                    key={item.href}
-                    href={item.href}
-                    className={`px-3.5 py-2 rounded-xl text-sm font-medium transition-all ${
-                      isActive
-                        ? 'bg-indigo-50 text-indigo-600 font-semibold shadow-2xs'
-                        : 'text-slate-600 hover:text-slate-900 hover:bg-slate-100/80'
-                    }`}
-                  >
-                    {item.name}
-                  </Link>
-                );
-              })}
-            </nav>
-          )}
+                {navItems.map((item) => {
+                  const isActive = pathname.startsWith(item.href);
+                  return (
+                    <Link
+                      key={item.href}
+                      href={item.href}
+                      className={`px-3 py-1.5 rounded-xl text-sm font-medium transition-all ${
+                        isActive
+                          ? 'bg-indigo-50 text-indigo-600 font-semibold'
+                          : 'text-slate-600 hover:text-slate-900 hover:bg-slate-100'
+                      }`}
+                    >
+                      {item.name}
+                    </Link>
+                  );
+                })}
+              </nav>
+            )}
+
+            {/* Language Switch Button */}
+            <button
+              onClick={toggleLanguage}
+              className="ml-2 px-3 py-1.5 rounded-xl border border-slate-200 bg-white text-xs font-bold text-slate-700 hover:bg-slate-50 transition-all flex items-center gap-1.5 shadow-2xs"
+            >
+              <span>🌐</span>
+              <span>{lang === 'he' ? 'English' : 'עברית'}</span>
+            </button>
+          </div>
         </div>
       </div>
     </header>
