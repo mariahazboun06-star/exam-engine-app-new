@@ -9,113 +9,121 @@ export default function TopicMatrixPage() {
   useEffect(() => {
     setMatrixData({
       exams: [
-        { id: 'e1', title: '2023 Sem A Moed A' },
-        { id: 'e2', title: '2022 Sem B Midterm' }
+        { id: 'e1', title: '2020 אמריקאי מועד א' },
+        { id: 'e2', title: '2021 אמריקאי מועד ב' }
       ],
       topics: [
-        { id: 't1', name: 'Derivatives & Limits' },
-        { id: 't2', name: 'Integrals & Area' }
+        { id: 't1', num: 1, name: 'וקטורים, מכפלה פנימית ומכפלה וקטורית' },
+        { id: 't2', num: 2, name: 'גיאומטריה אנליטית – מישורים וישרים' },
+        { id: 't3', num: 3, name: 'משטחים ריבועיים' },
+        { id: 't4', num: 4, name: 'פונקציות – גבולות ורציפות' },
+        { id: 't5', num: 5, name: 'דיפרנציאביליות, נגזרות חלקיות, נגזרות מכוונות, כלל השרשרת, הגרדיאנט' },
+        { id: 't6', num: 6, name: 'פולינום טיילור, משפט הפונקציות הסתומות' },
+        { id: 't7', num: 7, name: 'קיצון וקיצון מקומי, אפיון קיצון מקומי, כופלי לגרנז' },
+        { id: 't8', num: 8, name: 'אינטגרל כפול' },
+        { id: 't9', num: 9, name: 'אינטגרל משולש' },
+        { id: 't10', num: 10, name: 'אינטגרל קווי מסוג ראשון ושני. משפט גרין, שדה משמר במישור' },
+        { id: 't11', num: 11, name: 'אינטגרל משטחי מסוג ראשון ושני' },
+        { id: 't12', num: 12, name: 'משפט גאוס ומשפט סטוקס' }
       ],
       questions: [
-        { id: 'q1', q_number: 1, exam_id: 'e1', topic_id: 't1', first_try_correct: true, total_attempts: 1 },
-        { id: 'q2', q_number: 3, exam_id: 'e1', topic_id: 't1', first_try_correct: false, total_attempts: 2, latest_correct: true },
-        { id: 'q3', q_number: 2, exam_id: 'e2', topic_id: 't2', first_try_correct: null, total_attempts: 0 }
+        { id: 'q1', q_number: '1', exam_id: 'e1', topic_id: 't1', status: 'correct' },
+        { id: 'q2', q_number: '3', exam_id: 'e1', topic_id: 't5', status: 'correct' },
+        { id: 'q3', q_number: '6', exam_id: 'e1', topic_id: 't6', status: 'correct' },
+        { id: 'q4', q_number: '5', exam_id: 'e1', topic_id: 't7', status: 'correct' },
+        { id: 'q5', q_number: '2', exam_id: 'e1', topic_id: 't8', status: 'correct' },
+        { id: 'q6', q_number: '4', exam_id: 'e1', topic_id: 't9', status: 'correct' }
       ]
     });
   }, []);
 
   if (!matrixData) {
     return (
-      <div className="min-h-[60vh] flex items-center justify-center">
-        <div className="text-slate-400 font-medium animate-pulse">Loading Knowledge Matrix...</div>
+      <div className="min-h-[60vh] flex items-center justify-center" dir="rtl">
+        <div className="text-slate-400 font-medium animate-pulse">טוען את מטריצת הנושאים...</div>
       </div>
     );
   }
 
-  const getQuestionStyle = (q: any) => {
-    if (q.first_try_correct === true) {
-      return 'bg-emerald-50 text-emerald-700 border-emerald-200/80 shadow-2xs';
-    }
-    if (q.first_try_correct === false && q.latest_correct && q.total_attempts > 1) {
-      return 'bg-amber-50 text-amber-700 border-amber-200/80 shadow-2xs';
-    }
-    return 'bg-slate-100 text-slate-600 border-slate-200/80';
-  };
-
   return (
-    <div className="max-w-7xl mx-auto pt-8 px-4 sm:px-6 lg:px-8 space-y-6">
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+    <div className="max-w-7xl mx-auto pt-6 px-4 sm:px-6 lg:px-8 space-y-6" dir="rtl">
+      {/* Header Bar */}
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-slate-200 pb-4">
         <div>
-          <h1 className="text-2xl sm:text-3xl font-bold text-slate-900 tracking-tight">Topic Mastery Matrix</h1>
+          <h1 className="text-2xl sm:text-3xl font-bold text-slate-900 tracking-tight">מטריצת נושאי הבחינות</h1>
           <p className="text-slate-500 text-sm mt-1">
-            Click on any topic row to start practicing its questions.
+            לחץ על נושא בסילבוס כדי להתחיל לתרגל את השאלות המקושרות אליו.
           </p>
         </div>
 
-        <div className="flex items-center gap-4 bg-white px-4 py-2.5 rounded-2xl border border-slate-200/80 text-xs font-medium text-slate-600 shadow-2xs">
+        {/* Legend */}
+        <div className="flex items-center gap-4 bg-white px-4 py-2 rounded-xl border border-slate-200 text-xs font-medium text-slate-600 shadow-2xs">
           <span className="flex items-center gap-1.5">
-            <span className="w-2.5 h-2.5 rounded-full bg-emerald-500"></span> 1st Try Correct
+            <span className="w-3 h-3 rounded bg-emerald-600"></span> נפתר בהצלחה
           </span>
           <span className="flex items-center gap-1.5">
-            <span className="w-2.5 h-2.5 rounded-full bg-amber-500"></span> Retried Correct
+            <span className="w-3 h-3 rounded bg-amber-500"></span> נדרשת חזרה
           </span>
           <span className="flex items-center gap-1.5">
-            <span className="w-2.5 h-2.5 rounded-full bg-slate-300"></span> Unsolved
+            <span className="text-slate-400 font-bold">—</span> ללא שאלה
           </span>
         </div>
       </div>
 
-      <div className="bg-white rounded-2xl border border-slate-200/80 shadow-xs overflow-hidden">
+      {/* Sheet Matrix Container */}
+      <div className="bg-white rounded-xl border border-slate-300 shadow-sm overflow-hidden">
         <div className="overflow-x-auto">
-          <table className="w-full border-collapse text-left">
+          <table className="w-full border-collapse text-right text-sm">
             <thead>
-              <tr className="bg-slate-50/80 border-b border-slate-200/80 text-xs uppercase tracking-wider text-slate-500 font-semibold">
-                <th className="p-4 sm:p-5 w-64">Topics</th>
+              <tr className="bg-slate-100 border-b border-slate-300 text-slate-800 font-bold">
+                <th className="p-3 border-l border-slate-300 min-w-[320px]">
+                  Syllabus Topic
+                </th>
                 {matrixData.exams.map((exam: any) => (
-                  <th key={exam.id} className="p-4 sm:p-5 text-center min-w-[160px]">
+                  <th key={exam.id} className="p-3 text-center min-w-[180px] border-l border-slate-300">
                     {exam.title}
                   </th>
                 ))}
               </tr>
             </thead>
-            <tbody className="divide-y divide-slate-100 text-sm">
+            <tbody className="divide-y divide-slate-200">
               {matrixData.topics.map((topic: any) => {
-                const topicQuestions = matrixData.questions.filter((q: any) => q.topic_id === topic.id);
-                const isTopicMastered = topicQuestions.length > 0 && topicQuestions.every((q: any) => q.first_try_correct === true);
-
                 return (
-                  <tr key={topic.id} className="hover:bg-slate-50/50 transition-colors">
-                    <td className={`p-4 sm:p-5 font-medium transition-colors ${isTopicMastered ? 'bg-emerald-50/60 text-emerald-950' : 'text-slate-800'}`}>
+                  <tr key={topic.id} className="hover:bg-slate-50 transition-colors">
+                    {/* Syllabus Topic Title */}
+                    <td className="p-3 font-medium text-slate-900 border-l border-slate-200">
                       <Link 
-                        href={`/simulation?topicId=${topic.id}`} 
-                        className="group inline-flex items-center gap-2 hover:text-indigo-600 transition-colors"
+                        href={`/simulation?topicId=${topic.id}`}
+                        className="hover:text-indigo-600 hover:underline transition-all block"
                       >
-                        <span>{topic.name}</span>
-                        <span className="text-slate-400 group-hover:translate-x-1 transition-transform text-xs">→</span>
+                        {topic.num}. {topic.name}
                       </Link>
                     </td>
 
+                    {/* Exam Columns */}
                     {matrixData.exams.map((exam: any) => {
-                      const cellQuestions = topicQuestions.filter((q: any) => q.exam_id === exam.id);
+                      const topicQuestions = matrixData.questions.filter(
+                        (q: any) => q.topic_id === topic.id && q.exam_id === exam.id
+                      );
+
+                      const hasQuestions = topicQuestions.length > 0;
+                      const isMastered = hasQuestions && topicQuestions.every((q: any) => q.status === 'correct');
 
                       return (
-                        <td key={exam.id} className="p-4 sm:p-5 text-center align-middle">
-                          {cellQuestions.length > 0 ? (
-                            <div className="flex flex-wrap items-center justify-center gap-1.5">
-                              {cellQuestions.map((q: any, idx: number) => (
-                                <span key={q.id} className="inline-flex items-center">
-                                  <span className={`px-2.5 py-1 text-xs font-semibold rounded-lg border ${getQuestionStyle(q)}`}>
-                                    Q{q.q_number}
-                                  </span>
-                                  {idx < cellQuestions.length - 1 && (
-                                    <span className="ml-1 text-xs font-normal text-slate-400">and</span>
-                                  )}
-                                </span>
-                              ))}
-                            </div>
-                          ) : (
-                            <span className="text-slate-300 font-light">—</span>
-                          )}
+                        <td 
+                          key={exam.id} 
+                          className={`p-3 text-center font-bold border-l border-slate-200 transition-colors ${
+                            isMastered 
+                              ? 'bg-emerald-600 text-white' 
+                              : hasQuestions 
+                              ? 'bg-amber-100 text-amber-900' 
+                              : 'text-slate-400'
+                          }`}
+                        >
+                          {hasQuestions 
+                            ? topicQuestions.map((q: any) => q.q_number).join(', ')
+                            : '—'
+                          }
                         </td>
                       );
                     })}

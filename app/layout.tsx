@@ -3,7 +3,7 @@ import Navbar from '@/app/components/Navbar';
 import './globals.css';
 
 export const metadata: Metadata = {
-  title: 'PrepEngine | Smart Student Hub',
+  title: 'Study Smarter | Smart Student Hub',
   description: 'Dynamic spaced repetition and exam mastery platform',
 };
 
