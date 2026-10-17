@@ -42,24 +42,10 @@ The content is organized as follows:
 <directory_structure>
 app/
   api/
-    ai/
-      generate-map/
-        route.ts
-      parse-exam/
-        route.ts
     exam/
       grade-image/
         route.ts
     extract-topics/
-      route.ts
-    ingest/
-      summaries/
-        route.ts
-      upload/
-        route.ts
-    ingest-booklet/
-      route.ts
-    ingest-exam/
       route.ts
     plan/
       generate/
@@ -70,21 +56,14 @@ app/
       progress/
         route.ts
   components/
+    ExamDayScreen.tsx
     Navbar.tsx
-  context-input/
-    page.tsx
+  context/
+    LanguageContext.tsx
   courses/
     [courseId]/
       page.tsx
-  create-exam/
-    page.tsx
   dashboard/
-    page.tsx
-  exams/
-    [id]/
-      page.tsx
-    simulation/
-      page.tsx
     page.tsx
   login/
     page.tsx
@@ -92,13 +71,15 @@ app/
     page.tsx
   plan/
     page.tsx
-  setup/
+  simulation/
     page.tsx
   study/
     focused/
       page.tsx
     page.tsx
   topics/
+    page.tsx
+  upload-exam/
     page.tsx
   actions.ts
   favicon.ico
@@ -112,6 +93,7 @@ lib/
     ingestionService.ts
     plannerService.ts
   supabaseClient.ts
+  translations.ts
 public/
   file.svg
   globe.svg
@@ -134,74 +116,6 @@ tsconfig.json
 
 <files>
 This section contains the contents of the repository's files.
-
-<file path="app/api/ai/generate-map/route.ts">
-import { NextResponse } from 'next/server';
-import { supabase } from '../../../../lib/supabaseClient';
-import { generateCourseKnowledgeMap } from '../../../../lib/services/geminiService';
-
-export async function POST(request: Request) {
-  try {
-    const { data: { user }, error: authError } = await supabase.auth.getUser();
-    if (authError || !user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
-
-    const body = await request.json();
-    const { courseId } = body;
-    if (!courseId) return NextResponse.json({ error: 'Missing courseId' }, { status: 400 });
-
-    // 1. Find the syllabus for this course in the database
-    const { data: fileRecord, error: fileError } = await supabase
-      .from('course_files')
-      .select('storage_path')
-      .eq('course_id', courseId)
-      .eq('file_type', 'syllabus')
-      .single();
-
-    if (fileError || !fileRecord) {
-      return NextResponse.json({ error: 'Syllabus not found for this course.' }, { status: 404 });
-    }
-
-    // 2. Download the file from Supabase Storage
-    const { data: fileData, error: downloadError } = await supabase.storage
-      .from('course-materials')
-      .download(fileRecord.storage_path);
-
-    if (downloadError || !fileData) {
-      return NextResponse.json({ error: 'Failed to download syllabus from storage.' }, { status: 500 });
-    }
-
-    const buffer = Buffer.from(await fileData.arrayBuffer());
-
-    // 3. Process with Gemini
-    const knowledgeMapJson = await generateCourseKnowledgeMap(buffer, fileData.type);
-
-    // 4. Save the generated map to Supabase
-    const { data: savedMap, error: insertError } = await supabase
-      .from('course_knowledge_maps')
-      .upsert({
-        course_id: courseId,
-        user_id: user.id,
-        map_data: knowledgeMapJson
-      }, { onConflict: 'course_id' })
-      .select()
-      .single();
-
-    if (insertError) throw new Error("Database insert failed: " + insertError.message);
-
-    // 5. Update the ingestion status
-    await supabase.from('course_files').update({ ingestion_status: 'completed' }).eq('course_id', courseId);
-
-    return NextResponse.json({
-      message: 'Knowledge map generated successfully.',
-      data: savedMap
-    }, { status: 200 });
-
-  } catch (error: any) {
-    console.error("AI Generation Error:", error);
-    return NextResponse.json({ error: error.message || 'Server error during AI generation.' }, { status: 500 });
-  }
-}
-</file>
 
 <file path="app/api/exam/grade-image/route.ts">
 import { NextResponse } from "next/server";
@@ -280,318 +194,6 @@ export async function POST(request: Request) {
 }
 </file>
 
-<file path="app/api/ingest/summaries/route.ts">
-import { NextResponse } from "next/server";
-import { supabase } from "@/lib/supabaseClient";
-import { GoogleGenerativeAI } from "@google/generative-ai";
-
-const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY || "");
-
-export async function POST(request: Request) {
-  try {
-    const formData = await request.formData();
-    const courseId = formData.get("courseId") as string;
-    const files = formData.getAll("files") as File[];
-
-    if (!courseId || !files || files.length === 0) {
-      return NextResponse.json({ error: "יש לספק מזהה קורס וקבצים להעלאה" }, { status: 400 });
-    }
-
-    const model = genAI.getGenerativeModel({
-      model: "gemini-1.5-flash",
-      systemInstruction: `
-        אתה מומחה OCR ופענוח מסמכים אקדמיים.
-        תפקידך לקרוא קבצי סיכום, כולל מחברות בחינה וסיכומים בכתב יד (גם אם הכתב לא קריא לחלוטין).
-        
-        הנחיות:
-        1. תרגם וחלץ את כל הטקסט המופיע במסמך/בתמונה בדיוק מרבי.
-        2. ארגן את הטקסט המפוענח בצורה מובנית לפי נושאי לימוד, הגדרות, נוסחאות ודוגמאות.
-        3. אל תחסיר פרטים לימודיים.
-      `,
-    });
-
-    const processedMaterials = [];
-
-    for (const file of files) {
-      const arrayBuffer = await file.arrayBuffer();
-      const base64Data = Buffer.from(arrayBuffer).toString("base64");
-
-      // שליחת הקובץ (תמונה/PDF) לפענוח כתב יד ב-Gemini
-      const result = await model.generateContent([
-        {
-          inlineData: {
-            data: base64Data,
-            mimeType: file.type || "application/pdf",
-          },
-        },
-        "פענח את כתב היד והטקסט בסיכום זה וסדר אותו כחומר לימוד רשמי לקורס.",
-      ]);
-
-      const transcribedText = result.response.text();
-
-      // שמירת המידע המפוענח ב-Supabase
-      const { data, error } = await supabase.from("course_materials").insert({
-        course_id: courseId,
-        material_type: "summary",
-        file_name: file.name,
-        content: transcribedText,
-      }).select().single();
-
-      if (error) throw error;
-      processedMaterials.push(data);
-    }
-
-    return NextResponse.json({
-      success: true,
-      message: `עובדו ונשמרו בהצלחה ${processedMaterials.length} סיכומים.`,
-    });
-  } catch (err: any) {
-    return NextResponse.json(
-      { error: err.message || "שגיאה בפענוח ועיבוד הסיכומים" },
-      { status: 500 }
-    );
-  }
-}
-</file>
-
-<file path="app/api/ingest/upload/route.ts">
-import { NextResponse } from 'next/server';
-// Using relative paths to fix the module not found error
-import { supabase } from '../../../../lib/supabaseClient';
-import { validateIngestionBatch } from '../../../../lib/services/ingestionService';
-
-export async function POST(request: Request) {
-  try {
-    // We removed createClient() and are using the imported 'supabase' instance directly
-    const { data: { user }, error: authError } = await supabase.auth.getUser();
-
-    if (authError || !user) {
-      return NextResponse.json({ error: 'Unauthorized access.' }, { status: 401 });
-    }
-
-    const formData = await request.formData();
-    const courseId = formData.get('courseId') as string;
-    const syllabus = formData.get('syllabus') as File;
-    const textbook = formData.get('textbook') as File;
-    const examFiles = formData.getAll('exams') as File[];
-
-    if (!courseId) {
-      return NextResponse.json({ error: 'Missing courseId parameter.' }, { status: 400 });
-    }
-
-    // Server-side validation check for 20+ exams rule
-    const validation = validateIngestionBatch(examFiles.length, !!syllabus, !!textbook);
-    if (!validation.valid) {
-      return NextResponse.json({ error: 'Validation failed', details: validation.errors }, { status: 422 });
-    }
-
-    return NextResponse.json({
-      message: 'Batch uploaded and queued for processing successfully.',
-      status: 'pending_processing',
-      filesCount: 2 + examFiles.length
-    }, { status: 200 });
-
-  } catch (error: any) {
-    return NextResponse.json({ error: error.message || 'Server error during batch ingestion.' }, { status: 500 });
-  }
-}
-</file>
-
-<file path="app/api/ingest-booklet/route.ts">
-import { NextResponse } from "next/server";
-import { supabase } from "@/lib/supabaseClient";
-import { parseCourseBooklet } from "@/lib/services/geminiService";
-
-export async function POST(request: Request) {
-  try {
-    const { courseId } = await request.json();
-    if (!courseId) {
-      return NextResponse.json({ error: "Missing courseId" }, { status: 400 });
-    }
-
-    // 1. שליפת קובץ החוברת המעודכן מתוך course_files
-    const { data: files } = await supabase
-      .from("course_files")
-      .select("file_path")
-      .eq("course_id", courseId)
-      .eq("file_type", "booklet")
-      .order("created_at", { ascending: false })
-      .limit(1);
-
-    if (!files || files.length === 0) {
-      return NextResponse.json({ error: "Course booklet file not found" }, { status: 404 });
-    }
-
-    // 2. הורדת הקובץ מ-Supabase Storage
-    const { data: blob, error: downloadError } = await supabase.storage
-      .from("course-materials")
-      .download(files[0].file_path);
-
-    if (downloadError || !blob) {
-      throw new Error("Failed to download booklet file from storage");
-    }
-
-    const arrayBuffer = await blob.arrayBuffer();
-    const buffer = Buffer.from(arrayBuffer);
-
-    // 3. ניתוח החוברת באמצעות Gemini
-    const items = await parseCourseBooklet(buffer, "application/pdf");
-
-    // 4. שליפת topic ברירת מחדל לקישור (או הנושא הראשון)
-    const { data: topics } = await supabase
-      .from("course_topics")
-      .select("id")
-      .eq("course_id", courseId)
-      .limit(1);
-
-    const defaultTopicId = topics?.[0]?.id || null;
-
-    // 5. הכנת הפריטים לשמירה ב-Database
-    const conceptsToInsert = items.map((item: any) => ({
-      course_id: courseId,
-      topic_id: defaultTopicId,
-      concept_name: item.conceptName,
-      item_type: item.itemType || "concept",
-      recall_prompt: item.recallPrompt,
-      recall_answer: item.recallAnswer,
-      detailed_explanation: item.detailedExplanation || "",
-      description: item.detailedExplanation || "",
-      status_color: "red"
-    }));
-
-    const { data: inserted, error: insertError } = await supabase
-      .from("course_concepts")
-      .insert(conceptsToInsert)
-      .select();
-
-    if (insertError) {
-      throw new Error("Failed to save booklet items: " + insertError.message);
-    }
-
-    return NextResponse.json({
-      success: true,
-      insertedCount: inserted?.length || 0
-    });
-  } catch (err: any) {
-    return NextResponse.json(
-      { error: err.message || "Failed to process course booklet" },
-      { status: 500 }
-    );
-  }
-}
-</file>
-
-<file path="app/api/ingest-exam/route.ts">
-import { NextResponse } from "next/server";
-import { supabase } from "@/lib/supabaseClient";
-import { parseExamQuestions } from "@/lib/services/geminiService";
-
-export async function POST(request: Request) {
-  try {
-    const { courseId, examId } = await request.json();
-    if (!courseId) {
-      return NextResponse.json({ error: "Missing courseId" }, { status: 400 });
-    }
-
-    // 1. שליפת רשימת הנושאים הקיימים בסילבוס הקורס
-    const { data: topics, error: topicsErr } = await supabase
-      .from("course_topics")
-      .select("id, title")
-      .eq("course_id", courseId);
-
-    if (topicsErr || !topics) {
-      throw new Error("Failed to fetch course topics for classification");
-    }
-
-    // 2. שליפת קובץ המבחן מתוך course_files
-    const { data: files } = await supabase
-      .from("course_files")
-      .select("file_path")
-      .eq("course_id", courseId)
-      .eq("file_type", "exam")
-      .order("created_at", { ascending: false })
-      .limit(1);
-
-    if (!files || files.length === 0) {
-      return NextResponse.json({ error: "Exam file not found" }, { status: 404 });
-    }
-
-    // 3. הורדת הקובץ מ-Supabase Storage
-    const { data: blob, error: downloadError } = await supabase.storage
-      .from("course-materials")
-      .download(files[0].file_path);
-
-    if (downloadError || !blob) {
-      throw new Error("Failed to download exam file");
-    }
-
-    const buffer = Buffer.from(await blob.arrayBuffer());
-
-    // 4. ניתוח וסיווג השאלות בעזרת Gemini
-    const questions = await parseExamQuestions(buffer, "application/pdf", topics);
-
-    // 5. שמירת השאלות המסווגות ב-Database
-    const questionsToInsert = questions.map((q: any) => ({
-      course_id: courseId,
-      exam_id: examId || null,
-      question_number: q.questionNumber,
-      question_text: q.questionText,
-      is_trap: q.isTrap || false,
-      topic_id: q.topicId || null,
-      guidance_notes: q.guidanceNotes || "",
-      solution_text: q.solutionText || ""
-    }));
-
-    const { data: insertedQuestions, error: insertErr } = await supabase
-      .from("exam_questions")
-      .insert(questionsToInsert)
-      .select();
-
-    if (insertErr) throw insertErr;
-
-    // 6. חישוב ועדכון שכיחות ומשקל הנושאים במבחנים (course_topic_stats)
-    const { data: allCourseQuestions } = await supabase
-      .from("exam_questions")
-      .select("topic_id")
-      .eq("course_id", courseId);
-
-    const totalQuestionsCount = allCourseQuestions?.length || 0;
-
-    if (totalQuestionsCount > 0) {
-      const countsByTopic: Record<string, number> = {};
-      allCourseQuestions?.forEach((q) => {
-        if (q.topic_id) {
-          countsByTopic[q.topic_id] = (countsByTopic[q.topic_id] || 0) + 1;
-        }
-      });
-
-      const statsUpserts = Object.keys(countsByTopic).map((tId) => ({
-        course_id: courseId,
-        topic_id: tId,
-        question_count: countsByTopic[tId],
-        appearance_percentage: Number(((countsByTopic[tId] / totalQuestionsCount) * 100).toFixed(1))
-      }));
-
-      if (statsUpserts.length > 0) {
-        await supabase
-          .from("course_topic_stats")
-          .upsert(statsUpserts, { onConflict: "course_id,topic_id" });
-      }
-    }
-
-    return NextResponse.json({
-      success: true,
-      insertedCount: insertedQuestions?.length || 0
-    });
-  } catch (err: any) {
-    return NextResponse.json(
-      { error: err.message || "Failed to process exam" },
-      { status: 500 }
-    );
-  }
-}
-</file>
-
 <file path="app/api/solve/route.ts">
 import { NextResponse } from "next/server";
 import { supabase } from "@/lib/supabaseClient";
@@ -658,74 +260,106 @@ export async function POST(request: Request) {
 }
 </file>
 
-<file path="app/components/Navbar.tsx">
+<file path="app/components/ExamDayScreen.tsx">
 'use client';
 
-import Link from 'next/link';
-import { useEffect, useState } from 'react';
-import { supabase } from '@/lib/supabaseClient';
 import { useRouter } from 'next/navigation';
 
-export default function Navbar() {
-  const [user, setUser] = useState<any>(null);
+export default function ExamDayScreen({ onUnlockStudy }: { onUnlockStudy: () => void }) {
   const router = useRouter();
 
+  return (
+    <div className="min-h-[75vh] flex items-center justify-center px-4">
+      <div className="max-w-xl w-full text-center bg-white rounded-3xl border border-slate-200/80 shadow-sm p-8 sm:p-10 space-y-6">
+        <div className="inline-flex items-center justify-center w-16 h-16 rounded-2xl bg-indigo-50 text-indigo-600 text-2xl font-bold">
+          🎉
+        </div>
+
+        <div className="space-y-2">
+          <h1 className="text-3xl font-extrabold text-slate-900 tracking-tight">It's Exam Day!</h1>
+          <p className="text-slate-600 font-medium">You've put in the hours, and the data shows you are ready.</p>
+        </div>
+
+        <div className="bg-slate-50 border border-slate-200/80 rounded-2xl p-5 text-left text-sm text-slate-600 space-y-2">
+          <span className="inline-block text-xs font-bold text-indigo-600 uppercase tracking-wider">Our Recommendation</span>
+          <p className="leading-relaxed">
+            Step away from active testing today. Your brain needs time to consolidate formulas and concepts. Taking a breather right now gives your recall memory the best chance to perform at peak capacity.
+          </p>
+        </div>
+
+        <div className="flex flex-col sm:flex-row gap-3 pt-2">
+          <button 
+            onClick={() => router.push('/')} 
+            className="flex-1 py-3 px-4 bg-indigo-600 hover:bg-indigo-700 text-white font-semibold rounded-xl shadow-sm transition text-sm"
+          >
+            Close & Rest (Recommended)
+          </button>
+          
+          <button 
+            onClick={onUnlockStudy}
+            className="flex-1 py-3 px-4 bg-white hover:bg-slate-50 text-slate-700 font-semibold rounded-xl border border-slate-200 transition text-sm"
+          >
+            Free Course Review
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+</file>
+
+<file path="app/context/LanguageContext.tsx">
+'use client';
+
+import React, { createContext, useContext, useState, useEffect } from 'react';
+import { translations, Language, TranslationKey } from '@/lib/translations';
+
+interface LanguageContextType {
+  lang: Language;
+  dir: 'rtl' | 'ltr';
+  toggleLanguage: () => void;
+  t: (key: TranslationKey) => string;
+}
+
+const LanguageContext = createContext<LanguageContextType | undefined>(undefined);
+
+export function LanguageProvider({ children }: { children: React.ReactNode }) {
+  const [lang, setLang] = useState<Language>('he');
+
   useEffect(() => {
-    // 1. Check if a user is already logged in when the page loads
-    supabase.auth.getSession().then(({ data: { session } }) => {
-      setUser(session?.user ?? null);
-    });
-
-    // 2. Listen for any login or logout events
-    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
-      setUser(session?.user ?? null);
-    });
-
-    return () => subscription.unsubscribe();
+    const savedLang = localStorage.getItem('app_lang') as Language;
+    if (savedLang === 'he' || savedLang === 'en') {
+      setLang(savedLang);
+    }
   }, []);
 
-  const handleLogout = async () => {
-    await supabase.auth.signOut();
-    router.push('/'); // Send them back to the home page after logging out
+  useEffect(() => {
+    document.documentElement.dir = lang === 'he' ? 'rtl' : 'ltr';
+    document.documentElement.lang = lang;
+    localStorage.setItem('app_lang', lang);
+  }, [lang]);
+
+  const toggleLanguage = () => {
+    setLang((prev) => (prev === 'he' ? 'en' : 'he'));
+  };
+
+  const t = (key: TranslationKey): string => {
+    return translations[lang][key] || translations['he'][key] || key;
   };
 
   return (
-    <nav className="bg-white shadow-sm border-b border-gray-200">
-      <div className="max-w-4xl mx-auto px-6 py-4 flex justify-between items-center">
-        <Link href="/" className="text-2xl font-black text-blue-700 tracking-tight">
-          ExamEngine
-        </Link>
-        
-        <div className="space-x-4 flex items-center">
-          <Link href="/exams" className="text-gray-600 hover:text-blue-600 font-medium">
-            Student View
-          </Link>
-
-          {/* This is the smart part! If 'user' exists, show Teacher tools. If not, show Login. */}
-          {user ? (
-            <>
-              <Link href="/dashboard" className="text-gray-600 hover:text-blue-600 font-medium">
-                Teacher Dashboard
-              </Link>
-              <Link href="/create-exam" className="px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 font-medium transition-colors">
-                + Create Exam
-              </Link>
-              <button 
-                onClick={handleLogout} 
-                className="px-4 py-2 bg-gray-200 text-gray-800 rounded-md hover:bg-gray-300 font-medium transition-colors ml-4"
-              >
-                Log Out
-              </button>
-            </>
-          ) : (
-            <Link href="/login" className="px-4 py-2 bg-gray-800 text-white rounded-md hover:bg-gray-900 font-medium transition-colors ml-4">
-              Log In
-            </Link>
-          )}
-        </div>
-      </div>
-    </nav>
+    <LanguageContext.Provider value={{ lang, dir: lang === 'he' ? 'rtl' : 'ltr', toggleLanguage, t }}>
+      {children}
+    </LanguageContext.Provider>
   );
+}
+
+export function useLanguage() {
+  const context = useContext(LanguageContext);
+  if (!context) {
+    throw new Error('useLanguage must be used within a LanguageProvider');
+  }
+  return context;
 }
 </file>
 
@@ -786,511 +420,6 @@ export default function CourseHubPage() {
           <h2 className="font-bold text-base text-gray-900">4. סימולציית מבחן בזמן אמת</h2>
           <p className="text-xs text-gray-500">הדמיית מבחן אמת כולל בדיקת פתרונות פתוחים מתמונות כתב יד.</p>
         </Link>
-      </div>
-    </div>
-  );
-}
-</file>
-
-<file path="app/create-exam/page.tsx">
-'use client';
-
-import { useState } from 'react';
-import { supabase } from '@/lib/supabaseClient';
-
-interface QuestionInput {
-  questionText: string;
-  options: string[];
-  correctAnswer: string;
-}
-
-export default function CreateExamPage() {
-  const [title, setTitle] = useState('');
-  const [description, setDescription] = useState('');
-  const [questions, setQuestions] = useState<QuestionInput[]>([
-    { questionText: '', options: ['', '', '', ''], correctAnswer: '' },
-  ]);
-  const [loading, setLoading] = useState(false);
-  const [message, setMessage] = useState('');
-
-  const handleQuestionChange = (index: number, field: string, value: string) => {
-    const updated = [...questions];
-    if (field === 'questionText') updated[index].questionText = value;
-    if (field === 'correctAnswer') updated[index].correctAnswer = value;
-    setQuestions(updated);
-  };
-
-  const handleOptionChange = (qIndex: number, oIndex: number, value: string) => {
-    const updated = [...questions];
-    updated[qIndex].options[oIndex] = value;
-    setQuestions(updated);
-  };
-
-  const addQuestion = () => {
-    setQuestions([
-      ...questions,
-      { questionText: '', options: ['', '', '', ''], correctAnswer: '' },
-    ]);
-  };
-
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setLoading(true);
-    setMessage('');
-
-    try {
-      // 1. Insert Exam into Database
-      const { data: examData, error: examError } = await supabase
-        .from('exams')
-        .insert([{ title, description }])
-        .select()
-        .single();
-
-      if (examError) throw examError;
-
-      // 2. Prepare & Insert Questions
-      const questionsToInsert = questions.map((q) => ({
-        exam_id: examData.id,
-        question_text: q.questionText,
-        options: q.options,
-        correct_answer: q.correctAnswer,
-      }));
-
-      const { error: questionsError } = await supabase
-        .from('questions')
-        .insert(questionsToInsert);
-
-      if (questionsError) throw questionsError;
-
-      setMessage('Exam created and saved to Supabase successfully!');
-      setTitle('');
-      setDescription('');
-      setQuestions([{ questionText: '', options: ['', '', '', ''], correctAnswer: '' }]);
-    } catch (err: any) {
-      setMessage(`Error saving exam: ${err.message}`);
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  return (
-    <div className="max-w-3xl mx-auto p-6 bg-white shadow-md rounded-lg mt-10">
-      <h1 className="text-2xl font-bold mb-6 text-gray-800">Create New Exam</h1>
-
-      {message && (
-        <div className={`p-4 mb-4 rounded ${message.startsWith('Error') ? 'bg-red-100 text-red-700' : 'bg-green-100 text-green-700'}`}>
-          {message}
-        </div>
-      )}
-
-      <form onSubmit={handleSubmit} className="space-y-6">
-        <div>
-          <label className="block text-sm font-medium text-gray-700 mb-1">Exam Title</label>
-          <input
-            type="text"
-            required
-            value={title}
-            onChange={(e) => setTitle(e.target.value)}
-            className="w-full border border-gray-300 rounded-md p-2 text-gray-900 focus:outline-none focus:ring-2 focus:ring-blue-500"
-            placeholder="e.g., Mathematics Midterm"
-          />
-        </div>
-
-        <div>
-          <label className="block text-sm font-medium text-gray-700 mb-1">Description</label>
-          <textarea
-            value={description}
-            onChange={(e) => setDescription(e.target.value)}
-            className="w-full border border-gray-300 rounded-md p-2 text-gray-900 focus:outline-none focus:ring-2 focus:ring-blue-500"
-            placeholder="e.g., Covers chapters 1 through 4"
-          />
-        </div>
-
-        <hr className="my-6 border-gray-200" />
-
-        <h2 className="text-xl font-semibold text-gray-800">Questions</h2>
-
-        {questions.map((q, qIdx) => (
-          <div key={qIdx} className="p-4 border border-gray-200 rounded-md bg-gray-50 space-y-4">
-            <h3 className="font-medium text-gray-700">Question {qIdx + 1}</h3>
-
-            <div>
-              <input
-                type="text"
-                required
-                value={q.questionText}
-                onChange={(e) => handleQuestionChange(qIdx, 'questionText', e.target.value)}
-                className="w-full border border-gray-300 rounded-md p-2 text-gray-900 focus:outline-none focus:ring-2 focus:ring-blue-500"
-                placeholder="Enter question text"
-              />
-            </div>
-
-            <div className="grid grid-cols-2 gap-3">
-              {q.options.map((opt, oIdx) => (
-                <div key={oIdx}>
-                  <label className="block text-xs font-medium text-gray-500 mb-1">Option {oIdx + 1}</label>
-                  <input
-                    type="text"
-                    required
-                    value={opt}
-                    onChange={(e) => handleOptionChange(qIdx, oIdx, e.target.value)}
-                    className="w-full border border-gray-300 rounded-md p-2 text-gray-900 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-                    placeholder={`Option ${oIdx + 1}`}
-                  />
-                </div>
-              ))}
-            </div>
-
-            <div>
-              <label className="block text-xs font-medium text-gray-500 mb-1">Correct Answer</label>
-              <input
-                type="text"
-                required
-                value={q.correctAnswer}
-                onChange={(e) => handleQuestionChange(qIdx, 'correctAnswer', e.target.value)}
-                className="w-full border border-gray-300 rounded-md p-2 text-gray-900 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-                placeholder="Must match one option exactly"
-              />
-            </div>
-          </div>
-        ))}
-
-        <button
-          type="button"
-          onClick={addQuestion}
-          className="px-4 py-2 bg-gray-200 text-gray-800 rounded-md hover:bg-gray-300 text-sm font-medium"
-        >
-          + Add Another Question
-        </button>
-
-        <div>
-          <button
-            type="submit"
-            disabled={loading}
-            className="w-full py-3 bg-blue-600 text-white rounded-md hover:bg-blue-700 font-semibold transition-colors disabled:bg-blue-300"
-          >
-            {loading ? 'Saving Exam...' : 'Save Exam to Database'}
-          </button>
-        </div>
-      </form>
-    </div>
-  );
-}
-</file>
-
-<file path="app/exams/[id]/page.tsx">
-'use client';
-
-import { useEffect, useState } from 'react';
-import { supabase } from '@/lib/supabaseClient';
-import { useParams } from 'next/navigation';
-import { getAIFeedback } from '@/app/actions'; // <-- Importing our new AI action!
-
-interface Question {
-  id: string;
-  question_text: string;
-  options: string[];
-  correct_answer: string;
-}
-
-interface Exam {
-  id: string;
-  title: string;
-  description: string;
-}
-
-export default function TakeExamPage() {
-  const params = useParams();
-  const examId = params.id as string;
-
-  const [exam, setExam] = useState<Exam | null>(null);
-  const [questions, setQuestions] = useState<Question[]>([]);
-  const [answers, setAnswers] = useState<Record<string, string>>({});
-  const [loading, setLoading] = useState(true);
-  const [submitted, setSubmitted] = useState(false);
-  const [isGrading, setIsGrading] = useState(false);
-  const [score, setScore] = useState(0);
-  const [feedback, setFeedback] = useState("");
-
-  useEffect(() => {
-    async function fetchExamData() {
-      try {
-        const { data: examData } = await supabase.from('exams').select('*').eq('id', examId).single();
-        setExam(examData);
-
-        const { data: questionsData } = await supabase.from('questions').select('*').eq('exam_id', examId);
-        setQuestions(questionsData || []);
-      } catch (err) {
-        console.error(err);
-      } finally {
-        setLoading(false);
-      }
-    }
-    if (examId) fetchExamData();
-  }, [examId]);
-
-  const handleOptionSelect = (questionId: string, selectedOption: string) => {
-    setAnswers((prev) => ({ ...prev, [questionId]: selectedOption }));
-  };
-
-  const handleSubmit = async () => {
-    setIsGrading(true); // Start the loading animation
-    
-    let currentScore = 0;
-    let wrongAnswersContext = "";
-    
-    // Grade the exam and collect wrong answers for the AI
-    questions.forEach((q) => {
-      if (answers[q.id] === q.correct_answer) {
-        currentScore += 1;
-      } else {
-        wrongAnswersContext += `Question: "${q.question_text}" (They guessed: ${answers[q.id]}). `;
-      }
-    });
-
-    const finalScore = (currentScore / questions.length) * 100;
-    setScore(finalScore);
-
-    // 🤖 CALL THE AI! 🤖
-    const aiMessage = await getAIFeedback(currentScore, questions.length, wrongAnswersContext);
-    setFeedback(aiMessage);
-
-    // Save result AND AI feedback to the database
-    try {
-      await supabase.from('submissions').insert([
-        { exam_id: examId, score: finalScore, ai_feedback: aiMessage }
-      ]);
-    } catch (err) {
-      console.error(err);
-    }
-
-    setIsGrading(false);
-    setSubmitted(true);
-  };
-
-  if (loading) return <div className="p-10 text-center">Loading exam...</div>;
-  if (!exam) return <div className="p-10 text-center text-red-600">Exam not found.</div>;
-
-  return (
-    <div className="max-w-3xl mx-auto p-6 mt-10 bg-white shadow-lg rounded-lg border border-gray-100">
-      <h1 className="text-3xl font-bold mb-2 text-blue-600">{exam.title}</h1>
-      <p className="text-gray-600 mb-8 pb-4 border-b border-gray-200">{exam.description}</p>
-
-      {isGrading ? (
-        <div className="p-12 text-center">
-          <div className="text-4xl mb-4 animate-bounce">🤖</div>
-          <h2 className="text-2xl font-bold text-gray-800 animate-pulse">AI is grading your exam...</h2>
-        </div>
-      ) : submitted ? (
-        <div className="space-y-6">
-          <div className="p-8 bg-green-50 border border-green-200 rounded-lg text-center shadow-inner">
-            <h2 className="text-3xl font-bold text-green-700 mb-3">Exam Completed!</h2>
-            <p className="text-xl text-green-900">Your Score: <span className="font-black">{score.toFixed(1)}%</span></p>
-          </div>
-          
-          <div className="p-6 bg-blue-50 border border-blue-200 rounded-lg">
-            <h3 className="font-bold text-blue-800 mb-2 flex items-center gap-2">
-              <span>✨</span> AI Teacher Feedback
-            </h3>
-            <p className="text-blue-900 leading-relaxed">{feedback}</p>
-          </div>
-        </div>
-      ) : (
-        <div className="space-y-8">
-          {questions.map((q, index) => (
-            <div key={q.id} className="p-6 border border-gray-200 rounded-lg bg-gray-50 shadow-sm">
-              <h3 className="font-semibold text-lg text-gray-800 mb-4">{index + 1}. {q.question_text}</h3>
-              <div className="space-y-3">
-                {q.options.map((opt, i) => (
-                  <label key={i} className="flex items-center space-x-3 cursor-pointer p-3 bg-white border border-gray-200 rounded-md hover:bg-blue-50 transition-colors">
-                    <input
-                      type="radio"
-                      name={`question-${q.id}`}
-                      value={opt}
-                      onChange={() => handleOptionSelect(q.id, opt)}
-                      className="h-5 w-5 text-blue-600"
-                    />
-                    <span className="text-gray-700 font-medium">{opt}</span>
-                  </label>
-                ))}
-              </div>
-            </div>
-          ))}
-          
-          <button
-            onClick={handleSubmit}
-            disabled={Object.keys(answers).length < questions.length}
-            className="w-full py-4 bg-blue-600 text-white rounded-md hover:bg-blue-700 text-lg font-bold shadow-md transition-all disabled:bg-gray-400"
-          >
-            Submit Exam
-          </button>
-        </div>
-      )}
-    </div>
-  );
-}
-</file>
-
-<file path="app/exams/simulation/page.tsx">
-"use client";
-
-import { useEffect, useState } from "react";
-import { supabase } from "@/lib/supabaseClient";
-
-interface ExamQuestion {
-  id: string;
-  question_text: string;
-  question_type: "multiple_choice" | "open";
-  options?: string[]; // עבור שאלות אמריקאיות
-  solution_text?: string;
-}
-
-interface ImageGradeResult {
-  isCorrect: boolean;
-  score: number;
-  transcribedText: string;
-  feedback: string;
-}
-
-export default function ExamSimulationPage() {
-  const [questions, setQuestions] = useState<ExamQuestion[]>([]);
-  const [courseId, setCourseId] = useState<string | null>(null);
-  const [selectedImage, setSelectedImage] = useState<Record<string, File>>({});
-  const [gradingState, setGradingState] = useState<Record<string, boolean>>({});
-  const [gradeResults, setGradeResults] = useState<Record<string, ImageGradeResult>>({});
-  const [loading, setLoading] = useState(true);
-
-  useEffect(() => {
-    async function initExam() {
-      const { data: courses } = await supabase.from("courses").select("id").limit(1);
-      if (!courses || courses.length === 0) {
-        setLoading(false);
-        return;
-      }
-      const cId = courses[0].id;
-      setCourseId(cId);
-
-      const { data: qData } = await supabase.from("exam_questions").select("*");
-      if (qData) {
-        setQuestions(
-          qData.map((q) => ({
-            id: q.id,
-            question_text: q.question_text,
-            question_type: q.options ? "multiple_choice" : "open",
-            options: q.options || [],
-            solution_text: q.solution_text,
-          }))
-        );
-      }
-      setLoading(false);
-    }
-    initExam();
-  }, []);
-
-  const handleFileChange = (questionId: string, file: File | null) => {
-    if (file) {
-      setSelectedImage((prev) => ({ ...prev, [questionId]: file }));
-    }
-  };
-
-  const submitHandwrittenSolution = async (questionId: string) => {
-    const file = selectedImage[questionId];
-    if (!file || !courseId) return;
-
-    setGradingState((prev) => ({ ...prev, [questionId]: true }));
-
-    const formData = new FormData();
-    formData.append("questionId", questionId);
-    formData.append("courseId", courseId);
-    formData.append("file", file);
-
-    try {
-      const res = await fetch("/api/exam/grade-image", { method: "POST", body: formData });
-      const data = await res.json();
-      if (data.success) {
-        setGradeResults((prev) => ({ ...prev, [questionId]: data }));
-      }
-    } catch {
-      alert("שגיאה בחיבור למנוע בדיקת התמונות.");
-    } finally {
-      setGradingState((prev) => ({ ...prev, [questionId]: false }));
-    }
-  };
-
-  if (loading) return <div className="p-8 text-center dir-rtl" dir="rtl">מכין את סימולציית המבחן...</div>;
-
-  return (
-    <div className="max-w-4xl mx-auto p-6 dir-rtl space-y-6" dir="rtl">
-      <div className="bg-amber-50 border border-amber-200 p-4 rounded-xl flex justify-between items-center">
-        <div>
-          <h1 className="text-xl font-bold text-amber-900">📝 סימולציית מבחן בזמן אמת</h1>
-          <p className="text-xs text-amber-800 mt-0.5">תרגול במבנה המבחן המלא. פתרונות פתוחים ניתן לצלם ולהעלות לבדיקת AI.</p>
-        </div>
-        <div className="bg-amber-600 text-white font-mono text-sm font-bold px-3 py-1.5 rounded-lg shadow">
-          ⏱️ 02:00:00
-        </div>
-      </div>
-
-      <div className="space-y-6">
-        {questions.map((q, idx) => (
-          <div key={q.id} className="bg-white p-5 rounded-xl border shadow-sm space-y-4">
-            <div className="flex justify-between items-start border-b pb-2">
-              <span className="font-bold text-sm text-gray-800">שאלה {idx + 1}</span>
-              <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-gray-100 text-gray-600">
-                {q.question_type === "multiple_choice" ? "אמריקאית" : "שאלה פתוחה"}
-              </span>
-            </div>
-
-            <p className="text-sm font-medium text-gray-900">{q.question_text}</p>
-
-            {/* שאלות רב בחירתיות */}
-            {q.question_type === "multiple_choice" && (
-              <div className="space-y-2 pt-2">
-                {q.options?.map((opt, oIdx) => (
-                  <label key={oIdx} className="flex items-center gap-2 p-2 rounded-lg border hover:bg-gray-50 text-xs cursor-pointer">
-                    <input type="radio" name={`q-${q.id}`} className="text-blue-600" />
-                    <span>{opt}</span>
-                  </label>
-                ))}
-              </div>
-            )}
-
-            {/* שאלות פתוחות - העלאת תמונה */}
-            {q.question_type === "open" && (
-              <div className="bg-gray-50 p-4 rounded-lg border border-dashed space-y-3">
-                <span className="text-xs font-bold text-gray-700 block">📷 העלאת צילום פתרון בכתב יד:</span>
-                <input
-                  type="file"
-                  accept="image/*"
-                  onChange={(e) => handleFileChange(q.id, e.target.files?.[0] || null)}
-                  className="block w-full text-xs text-gray-500 file:mr-4 file:py-1.5 file:px-3 file:rounded-md file:border-0 file:text-xs file:font-semibold file:bg-blue-50 file:text-blue-700"
-                />
-
-                {selectedImage[q.id] && (
-                  <button
-                    onClick={() => submitHandwrittenSolution(q.id)}
-                    disabled={gradingState[q.id]}
-                    className="bg-blue-600 hover:bg-blue-700 disabled:bg-gray-300 text-white font-bold text-xs py-2 px-4 rounded-lg transition"
-                  >
-                    {gradingState[q.id] ? "מפענח ובודק את התמונה..." : "בדוק פתרון מתוך התמונה"}
-                  </button>
-                )}
-
-                {/* תצוגת משוב והערכת AI למבחן */}
-                {gradeResults[q.id] && (
-                  <div className={`mt-3 p-4 rounded-lg border text-xs space-y-2 ${gradeResults[q.id].isCorrect ? "bg-green-50 border-green-200" : "bg-red-50 border-red-200"}`}>
-                    <div className="flex justify-between font-bold">
-                      <span>ציון לתשובה: {gradeResults[q.id].score}/100</span>
-                      <span>{gradeResults[q.id].isCorrect ? "🟢 תשובה נכונה" : "🔴 טעות בפתרון"}</span>
-                    </div>
-                    <p className="text-gray-700"><strong>טקסט שפוענח מכתב היד:</strong> {gradeResults[q.id].transcribedText}</p>
-                    <p className="text-gray-800"><strong>משוב מנוע הבדיקה:</strong> {gradeResults[q.id].feedback}</p>
-                  </div>
-                )}
-              </div>
-            )}
-          </div>
-        ))}
       </div>
     </div>
   );
@@ -1388,155 +517,238 @@ export default function LoginPage() {
 }
 </file>
 
-<file path="app/plan/page.tsx">
-"use client";
+<file path="app/simulation/page.tsx">
+'use client';
 
-import { useState } from "react";
-import { supabase } from "@/lib/supabaseClient";
+import { useSearchParams } from 'next/navigation';
+import { useEffect, useState, Suspense } from 'react';
 
-interface DailyTask {
-  day: number;
-  dateStr: string;
-  focusTopics: string[];
-  recallConceptsCount: number;
-  trapQuestionsCount: number;
-  estimatedHours: number;
-}
+function SimulationContent() {
+  const searchParams = useSearchParams();
+  const topicId = searchParams.get('topicId');
+  const courseId = searchParams.get('courseId');
+  
+  const [loading, setLoading] = useState(true);
+  const [feedback, setFeedback] = useState<string | null>(null);
+  const [currentQuestion, setCurrentQuestion] = useState<any>(null);
 
-export default function PlanPage() {
-  const [examDate, setExamDate] = useState("");
-  const [dailyHours, setDailyHours] = useState(4);
-  const [schedule, setSchedule] = useState<DailyTask[]>([]);
-  const [loading, setLoading] = useState(false);
+  const currentUser = { id: 'user-123' }; 
 
-  async function generatePlan() {
-    if (!examDate) {
-      alert("נא לבחור תאריך בחינה");
-      return;
-    }
-
-    setLoading(true);
-
-    // 1. שליפת מושגים הדורשים חזרה (אדום/צהוב) ושאלות מלכודת
-    const [{ data: concepts }, { data: traps }] = await Promise.all([
-      supabase.from("course_concepts").select("*").in("status_color", ["red", "yellow"]),
-      supabase.from("exam_questions").select("*").eq("is_trap", true),
-    ]);
-
-    const activeConcepts = concepts || [];
-    const activeTraps = traps || [];
-
-    // 2. חישוב הימים שנשארו עד הבחינה
-    const today = new Date();
-    const target = new Date(examDate);
-    const diffTime = Math.max(target.getTime() - today.getTime(), 0);
-    const totalDays = Math.max(Math.ceil(diffTime / (1000 * 60 * 60 * 24)), 1);
-
-    // 3. חלוקת העומס על פני הימים
-    const conceptsPerDay = Math.ceil(activeConcepts.length / totalDays);
-    const trapsPerDay = Math.ceil(activeTraps.length / totalDays);
-
-    const generatedSchedule: DailyTask[] = [];
-
-    for (let i = 0; i < totalDays; i++) {
-      const currentDate = new Date();
-      currentDate.setDate(today.getDate() + i);
-
-      const dayConcepts = activeConcepts.slice(i * conceptsPerDay, (i + 1) * conceptsPerDay);
-      const dayTraps = activeTraps.slice(i * trapsPerDay, (i + 1) * trapsPerDay);
-
-      const topicNames = Array.from(
-        new Set(dayConcepts.map((c) => c.concept_name))
-      ).slice(0, 3);
-
-      generatedSchedule.push({
-        day: i + 1,
-        dateStr: currentDate.toLocaleDateString("he-IL", {
-          weekday: "short",
-          month: "numeric",
-          day: "numeric",
-        }),
-        focusTopics: topicNames.length > 0 ? topicNames : ["חזרה כללית וסימולציות"],
-        recallConceptsCount: dayConcepts.length,
-        trapQuestionsCount: dayTraps.length,
-        estimatedHours: Math.min(dailyHours, Math.max(2, dayConcepts.length * 0.5)),
+  useEffect(() => {
+    async function loadSimulation() {
+      setCurrentQuestion({
+        id: 'q-1',
+        text: 'Calculate the derivative of x^2.',
+        options: ['x', '2x', 'x^2', '2'],
+        correctAnswer: '2x',
+        total_attempts: 0,
+        first_try_correct: null
       });
+      setLoading(false);
     }
 
-    setSchedule(generatedSchedule);
-    setLoading(false);
+    loadSimulation();
+  }, [topicId, courseId]);
+
+  async function handleAnswerSelection(selectedOption: string) {
+    if (!currentQuestion) return;
+
+    const isCorrect = selectedOption === currentQuestion.correctAnswer;
+    setFeedback(isCorrect ? "Correct!" : "Incorrect. The right answer was " + currentQuestion.correctAnswer);
+
+    const newAttempts = currentQuestion.total_attempts + 1;
+    const firstTryCorrect = currentQuestion.total_attempts === 0 && isCorrect ? true : false;
+
+    try {
+      await fetch('/api/study/progress', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          userId: currentUser.id,          
+          questionId: currentQuestion.id,  
+          isCorrect: isCorrect,
+          totalAttempts: newAttempts,
+          firstTryCorrect: firstTryCorrect
+        })
+      });
+    } catch (error) {
+      console.error("Failed to update attempt progress", error);
+    }
+  }
+
+  if (loading) {
+    return (
+      <div className="min-h-[60vh] flex items-center justify-center">
+        <div className="text-slate-400 font-medium animate-pulse">Loading simulation...</div>
+      </div>
+    );
   }
 
   return (
-    <div className="max-w-4xl mx-auto p-6 dir-rtl" dir="rtl">
-      <h1 className="text-2xl font-bold mb-2">מחולל לוח הזמנים החכם ללמידה</h1>
-      <p className="text-sm text-gray-600 mb-6">
-        בניית לו"ז אופטימלי המבוסס על תאריך המבחן, רמת השליטה במושגים (Active Recall) ושאלות מלכודת.
-      </p>
-
-      {/* טופס אילוצים */}
-      <div className="bg-white p-6 rounded-lg border shadow-sm mb-8 grid grid-cols-1 md:grid-cols-3 gap-4 items-end">
-        <div>
-          <label className="block text-xs font-bold text-gray-700 mb-1">תאריך הבחינה:</label>
-          <input
-            type="date"
-            value={examDate}
-            onChange={(e) => setExamDate(e.target.value)}
-            className="w-full border rounded p-2 text-sm"
-          />
+    <div className="max-w-3xl mx-auto pt-8 px-4">
+      <div className="bg-white rounded-2xl border border-slate-200/80 shadow-sm p-6 sm:p-8 space-y-6">
+        <div className="flex items-center justify-between border-b border-slate-100 pb-4">
+          <h1 className="text-xl sm:text-2xl font-bold text-slate-900 tracking-tight">
+            {topicId ? "Topic Practice Mode" : "Exam Simulation"}
+          </h1>
+          <span className="px-3 py-1 bg-indigo-50 text-indigo-600 rounded-full text-xs font-semibold">
+            Question 1
+          </span>
         </div>
+        
+        {currentQuestion ? (
+          <div className="space-y-6">
+            <h2 className="text-lg font-medium text-slate-800 leading-relaxed">
+              {currentQuestion.text}
+            </h2>
+            
+            <div className="space-y-3">
+              {currentQuestion.options.map((option: string) => (
+                <button 
+                  key={option}
+                  onClick={() => handleAnswerSelection(option)}
+                  className="w-full text-left p-4 rounded-xl border border-slate-200 hover:border-indigo-500 hover:bg-indigo-50/50 transition-all font-medium text-slate-700 text-sm flex items-center justify-between group"
+                >
+                  <span>{option}</span>
+                  <span className="w-5 h-5 rounded-full border border-slate-300 group-hover:border-indigo-500 group-hover:bg-indigo-500 transition-colors"></span>
+                </button>
+              ))}
+            </div>
 
-        <div>
-          <label className="block text-xs font-bold text-gray-700 mb-1">שעות לימוד זמינות ביום:</label>
-          <input
-            type="number"
-            min="1"
-            max="12"
-            value={dailyHours}
-            onChange={(e) => setDailyHours(Number(e.target.value))}
-            className="w-full border rounded p-2 text-sm"
-          />
-        </div>
-
-        <button
-          onClick={generatePlan}
-          disabled={loading}
-          className="bg-blue-600 text-white py-2 px-4 rounded font-semibold text-sm hover:bg-blue-700 disabled:opacity-50"
-        >
-          {loading ? "מחשב תוכנית..." : "צור תוכנית לימודית 📅"}
-        </button>
-      </div>
-
-      {/* הצגת לוח הזמנים */}
-      {schedule.length > 0 && (
-        <div className="space-y-4">
-          <h2 className="text-lg font-bold">תוכנית עבודה יומית מוצעת</h2>
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            {schedule.map((task) => (
-              <div key={task.day} className="bg-white p-5 rounded-lg border shadow-sm space-y-3">
-                <div className="flex justify-between items-center border-b pb-2">
-                  <span className="font-bold text-blue-900">יום {task.day} ({task.dateStr})</span>
-                  <span className="text-xs bg-gray-100 text-gray-700 px-2 py-0.5 rounded">
-                    ⏱️ כ-{task.estimatedHours} שעות
-                  </span>
-                </div>
-
-                <div>
-                  <h4 className="text-xs font-bold text-gray-500">מיקוד עיקרי:</h4>
-                  <p className="text-sm font-semibold text-gray-800">
-                    {task.focusTopics.join(", ")}
-                  </p>
-                </div>
-
-                <div className="flex gap-4 text-xs pt-1 border-t text-gray-600">
-                  <span>🎴 {task.recallConceptsCount} מושגי Active Recall</span>
-                  <span>🔥 {task.trapQuestionsCount} שאלות פינה/מלכודת</span>
-                </div>
+            {feedback && (
+              <div className={`p-4 rounded-xl border text-sm font-semibold ${
+                feedback.includes("Correct") 
+                  ? "bg-emerald-50 text-emerald-800 border-emerald-200" 
+                  : "bg-rose-50 text-rose-800 border-rose-200"
+              }`}>
+                {feedback}
               </div>
-            ))}
+            )}
           </div>
+        ) : (
+          <div className="text-center py-12 text-slate-500 font-medium">
+            No questions available. You have mastered this section!
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+export default function ExamSimulationPage() {
+  return (
+    <Suspense fallback={
+      <div className="min-h-[60vh] flex items-center justify-center">
+        <div className="text-slate-400 font-medium animate-pulse">Loading simulation page...</div>
+      </div>
+    }>
+      <SimulationContent />
+    </Suspense>
+  );
+}
+</file>
+
+<file path="app/upload-exam/page.tsx">
+'use client';
+
+import { useState } from 'react';
+import { useRouter } from 'next/navigation';
+
+export default function UploadExamPage() {
+  const router = useRouter();
+  const [formData, setFormData] = useState({
+    year: new Date().getFullYear().toString(),
+    semester: 'A',
+    testPeriod: 'Moed A',
+    file: null as File | null
+  });
+
+  async function handleUpload(e: React.FormEvent) {
+    e.preventDefault();
+    if (!formData.file) return alert("Please select an exam PDF first.");
+
+    const data = new FormData();
+    data.append('year', formData.year);
+    data.append('semester', formData.semester);
+    data.append('testPeriod', formData.testPeriod);
+    data.append('file', formData.file);
+    data.append('userId', 'user-123');
+
+    await fetch('/api/ingest-exam', { method: 'POST', body: data });
+    router.push('/matrix');
+  }
+
+  return (
+    <div className="max-w-xl mx-auto pt-10 px-4">
+      <div className="bg-white rounded-2xl border border-slate-200/80 shadow-sm p-6 sm:p-8">
+        <div className="mb-6">
+          <h1 className="text-2xl font-bold text-slate-900 tracking-tight">Upload Private Exam</h1>
+          <p className="text-slate-500 text-sm mt-1">
+            Add past exams to extract topics and populate your private question matrix.
+          </p>
         </div>
-      )}
+
+        <form onSubmit={handleUpload} className="space-y-5">
+          <div>
+            <label className="block text-xs font-semibold uppercase text-slate-500 mb-2">Exam Year</label>
+            <input 
+              type="number" 
+              value={formData.year}
+              required
+              className="w-full px-4 py-2.5 rounded-xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 transition text-sm text-slate-800"
+              onChange={e => setFormData({...formData, year: e.target.value})} 
+            />
+          </div>
+
+          <div className="grid grid-cols-2 gap-4">
+            <div>
+              <label className="block text-xs font-semibold uppercase text-slate-500 mb-2">Semester</label>
+              <select 
+                value={formData.semester}
+                className="w-full px-4 py-2.5 rounded-xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 transition text-sm text-slate-800 bg-white"
+                onChange={e => setFormData({...formData, semester: e.target.value})}
+              >
+                <option value="A">Semester A</option>
+                <option value="B">Semester B</option>
+                <option value="Summer">Summer</option>
+              </select>
+            </div>
+
+            <div>
+              <label className="block text-xs font-semibold uppercase text-slate-500 mb-2">Test Period</label>
+              <select 
+                value={formData.testPeriod}
+                className="w-full px-4 py-2.5 rounded-xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 transition text-sm text-slate-800 bg-white"
+                onChange={e => setFormData({...formData, testPeriod: e.target.value})}
+              >
+                <option value="Moed A">Moed A</option>
+                <option value="Moed B">Moed B</option>
+                <option value="Midterm">Midterm</option>
+              </select>
+            </div>
+          </div>
+
+          <div>
+            <label className="block text-xs font-semibold uppercase text-slate-500 mb-2">PDF File</label>
+            <div className="border-2 border-dashed border-slate-200 rounded-2xl p-6 text-center hover:border-indigo-400 transition cursor-pointer bg-slate-50/50">
+              <input 
+                type="file" 
+                accept="application/pdf" 
+                required
+                className="w-full text-sm text-slate-500 file:mr-4 file:py-2 file:px-4 file:rounded-xl file:border-0 file:text-xs file:font-semibold file:bg-indigo-50 file:text-indigo-600 hover:file:bg-indigo-100 cursor-pointer"
+                onChange={e => setFormData({...formData, file: e.target.files?.[0] || null})} 
+              />
+            </div>
+          </div>
+
+          <button 
+            type="submit" 
+            className="w-full py-3 px-4 bg-indigo-600 hover:bg-indigo-700 text-white font-semibold rounded-xl shadow-sm transition-all text-sm mt-2"
+          >
+            Process & Add to Matrix
+          </button>
+        </form>
+      </div>
     </div>
   );
 }
@@ -2117,90 +1329,6 @@ Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/bui
 }
 </file>
 
-<file path="app/api/ai/parse-exam/route.ts">
-import { NextResponse } from "next/server";
-import { supabase } from "@/lib/supabaseClient";
-import { extractExamQuestions } from "@/lib/services/geminiService";
-
-export async function POST(request: Request) {
-  try {
-    const { courseId } = await request.json();
-    if (!courseId) {
-      return NextResponse.json({ error: "Missing courseId" }, { status: 400 });
-    }
-
-    const { data: topics } = await supabase
-      .from("course_topics")
-      .select("id, topic_name")
-      .eq("course_id", courseId);
-
-    const { data: examFiles } = await supabase
-      .from("course_files")
-      .select("*")
-      .eq("course_id", courseId)
-      .eq("file_type", "exam");
-
-    if (!examFiles || examFiles.length === 0) {
-      return NextResponse.json({ error: "No exam files found" }, { status: 404 });
-    }
-
-    const insertedQuestions = [];
-
-    for (const exam of examFiles) {
-      const { data: blob, error: downloadError } = await supabase.storage
-        .from("course-materials")
-        .download(exam.file_path);
-
-      if (downloadError || !blob) continue;
-
-      const arrayBuffer = await blob.arrayBuffer();
-      const buffer = Buffer.from(arrayBuffer);
-
-      const parsedQuestions = await extractExamQuestions(buffer, "application/pdf");
-
-      const questionsToInsert = parsedQuestions.map((q: any, index: number) => {
-        const matchedTopic = topics?.find(
-          (t) => t.topic_name.toLowerCase() === q.topic?.toLowerCase()
-        );
-
-        return {
-          course_id: courseId,
-          exam_file_id: exam.id,
-          topic_id: matchedTopic ? matchedTopic.id : topics?.[0]?.id || null,
-          question_number: index + 1,
-          points: 0,
-          question_text: q.question_text || "",
-          solution_text: q.solution_text || null,
-          is_trap: q.is_trap || false,
-          guidance_notes: q.guidance_notes || "",
-        };
-      });
-
-      if (questionsToInsert.length > 0) {
-        const { data, error: insertError } = await supabase
-          .from("exam_questions")
-          .insert(questionsToInsert)
-          .select();
-
-        if (!insertError && data) {
-          insertedQuestions.push(...data);
-        }
-      }
-    }
-
-    return NextResponse.json({
-      success: true,
-      questionsCount: insertedQuestions.length,
-    });
-  } catch (err: any) {
-    return NextResponse.json(
-      { error: err.message || "Failed to parse exams" },
-      { status: 500 }
-    );
-  }
-}
-</file>
-
 <file path="app/api/extract-topics/route.ts">
 import { NextResponse } from "next/server";
 import { supabase } from "@/lib/supabaseClient";
@@ -2365,332 +1493,133 @@ export async function POST(request: Request) {
 }
 </file>
 
-<file path="app/api/study/progress/route.ts">
-import { NextResponse } from 'next/server';
-import { supabase } from '../../../../lib/supabaseClient';
+<file path="app/plan/page.tsx">
+'use client';
 
-export async function POST(request: Request) {
-  try {
-    // THIS is the part that was missing! It gets the logged-in user.
-    const { data: { user } } = await supabase.auth.getUser();
-    if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+import { useState, useEffect } from 'react';
+import ExamDayScreen from '@/app/components/ExamDayScreen';
 
-    const { questionId, isCorrect, currentLevel } = await request.json();
+export default function StudyPlannerPage() {
+  const [examDate, setExamDate] = useState<string | null>(null);
+  const [daysUntilExam, setDaysUntilExam] = useState<number | null>(null);
+  const [unlockedStudy, setUnlockedStudy] = useState(false);
+  const [feedback, setFeedback] = useState<string | null>(null);
 
-    // Spaced repetition logic: adjust level based on correctness
-    let newLevel = isCorrect ? Math.min(5, (currentLevel || 0) + 1) : Math.max(1, (currentLevel || 1) - 1);
-    
-    // Calculate next review time based on the new mastery level
-    const hoursToNextReview = [0, 12, 24, 72, 168, 336]; // L0=0h, L1=12h, L2=24h, L3=3d, L4=7d, L5=14d
-    const nextDate = new Date();
-    nextDate.setHours(nextDate.getHours() + hoursToNextReview[newLevel]);
-
-    const { data, error } = await supabase
-      .from('user_question_progress')
-      .upsert({
-        user_id: user.id,
-        question_id: questionId,
-        mastery_level: newLevel,
-        next_review_date: nextDate.toISOString(),
-        last_reviewed_at: new Date().toISOString()
-      }, { onConflict: 'user_id, question_id' })
-      .select()
-      .single();
-
-    if (error) throw error;
-
-    return NextResponse.json({ message: 'Progress updated', data }, { status: 200 });
-
-  } catch (error: any) {
-    return NextResponse.json({ error: error.message }, { status: 500 });
-  }
-}
-</file>
-
-<file path="app/context-input/page.tsx">
-"use client";
-
-import { useState } from 'react';
-import { useRouter } from 'next/navigation';
-
-export default function ContextInputPage() {
-  const router = useRouter();
-  const [examDate, setExamDate] = useState('');
-  const [studyHours, setStudyHours] = useState<number>(15);
-  const [targetGrade, setTargetGrade] = useState('A');
-  
-  const [isSubmitting, setIsSubmitting] = useState(false);
-
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setIsSubmitting(true);
-
-    // Construct the context payload
-    const contextData = {
-      courseId: '00000000-0000-0000-0000-000000000001', // Mock ID for V1
-      examDate,
-      studyHoursPerWeek: studyHours,
-      targetGrade
-    };
-
-    try {
-      const response = await fetch('/api/plan/generate', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(contextData),
-      });
-
-      const data = await response.json();
-
-      if (!response.ok) {
-        throw new Error(data.error || 'Failed to generate study plan.');
-      }
-      
-      // Redirect to the dashboard to view the plan
-      router.push('/dashboard');
-      
-    } catch (error: any) {
-      console.error("Failed to save context", error);
-      alert(error.message);
-    } finally {
-      setIsSubmitting(false);
-    }
-  };
-
-  return (
-    <div className="min-h-screen bg-gray-50 py-12 px-4 sm:px-6 lg:px-8">
-      <div className="max-w-2xl mx-auto bg-white rounded-xl shadow-md overflow-hidden">
-        <div className="px-8 py-6 border-b border-gray-200 bg-blue-600">
-          <h2 className="text-2xl font-bold text-white">Study Plan Parameters</h2>
-          <p className="mt-1 text-blue-100 text-sm">
-            Tell us about your schedule and goals so the AI can build a feasible plan.
-          </p>
-        </div>
-
-        <form onSubmit={handleSubmit} className="p-8 space-y-8">
-          
-          {/* Exam Date Section */}
-          <div>
-            <label className="block text-sm font-semibold text-gray-700">Final Exam Date</label>
-            <p className="text-xs text-gray-500 mb-2">When is the big day?</p>
-            <input 
-              type="date" 
-              required
-              value={examDate}
-              onChange={(e) => setExamDate(e.target.value)}
-              className="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm"
-            />
-          </div>
-
-          {/* Study Hours Section */}
-          <div>
-            <label className="block text-sm font-semibold text-gray-700">
-              Available Study Hours (Per Week)
-            </label>
-            <p className="text-xs text-gray-500 mb-4">Be realistic about how much time you can dedicate.</p>
-            
-            <div className="flex items-center space-x-4">
-              <input 
-                type="range" 
-                min="1" 
-                max="40" 
-                value={studyHours}
-                onChange={(e) => setStudyHours(Number(e.target.value))}
-                className="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer"
-              />
-              <span className="text-lg font-bold text-blue-600 w-12 text-center">
-                {studyHours}h
-              </span>
-            </div>
-          </div>
-
-          {/* Target Grade Section */}
-          <div>
-            <label className="block text-sm font-semibold text-gray-700">Target Grade</label>
-            <p className="text-xs text-gray-500 mb-2">What score are you aiming for?</p>
-            <select
-              value={targetGrade}
-              onChange={(e) => setTargetGrade(e.target.value)}
-              className="mt-1 block w-full px-3 py-2 bg-white border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm"
-            >
-              <option value="Pass">Just Pass (C / ~70%)</option>
-              <option value="B">Good (B / ~80%)</option>
-              <option value="A">Excellent (A / ~90%)</option>
-              <option value="A+">Mastery (A+ / 95%+)</option>
-            </select>
-          </div>
-
-          {/* Submit Button */}
-          <div className="pt-4 border-t border-gray-200">
-            <button
-              type="submit"
-              disabled={isSubmitting}
-              className={`w-full flex justify-center py-3 px-4 border border-transparent rounded-md shadow-sm text-sm font-medium text-white ${
-                isSubmitting ? 'bg-blue-400 cursor-not-allowed' : 'bg-blue-600 hover:bg-blue-700'
-              } focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 transition-colors`}
-            >
-              {isSubmitting ? 'Saving Parameters...' : 'Confirm Parameters'}
-            </button>
-          </div>
-
-        </form>
-      </div>
-    </div>
-  );
-}
-</file>
-
-<file path="app/exams/page.tsx">
-"use client";
-
-import { useEffect, useState } from 'react';
-import { supabase } from '../../lib/supabaseClient';
-
-export default function ExamsManagerPage() {
-  const [files, setFiles] = useState<any[]>([]);
-  const [questions, setQuestions] = useState<any[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [processingId, setProcessingId] = useState<string | null>(null);
-
-  // Fetch files and questions on load
-  const fetchData = async () => {
-    setLoading(true);
-    const { data: { user } } = await supabase.auth.getUser();
-    if (!user) return;
-
-    // Fetch uploaded exam files
-    const { data: filesData } = await supabase
-      .from('course_files')
-      .select('*')
-      .eq('user_id', user.id)
-      .eq('file_type', 'exam')
-      .order('created_at', { ascending: false });
-
-    if (filesData) setFiles(filesData);
-
-    // Fetch already extracted questions
-    const { data: questionsData } = await supabase
-      .from('exam_questions')
-      .select('*')
-      .eq('user_id', user.id)
-      .order('created_at', { ascending: false });
-
-    if (questionsData) setQuestions(questionsData);
-    setLoading(false);
+  const currentUser = { id: 'user-123' };
+  const currentDailyQuestion = {
+    id: 'q-2',
+    text: 'What is 5 x 5?',
+    options: ['10', '20', '25', '30'],
+    correctAnswer: '25',
+    mastery_level: 2
   };
 
   useEffect(() => {
-    fetchData();
+    const fetchedDate = "2026-11-15"; 
+    setExamDate(fetchedDate);
+
+    if (fetchedDate) {
+      const today = new Date();
+      today.setHours(0, 0, 0, 0); 
+      const targetDate = new Date(fetchedDate);
+      targetDate.setHours(0, 0, 0, 0);
+
+      const timeDiff = targetDate.getTime() - today.getTime();
+      const days = Math.ceil(timeDiff / (1000 * 3600 * 24));
+      setDaysUntilExam(days);
+    }
   }, []);
 
-  const handleExtract = async (fileId: string, courseId: string) => {
-    setProcessingId(fileId);
+  async function handleDailyReviewAnswer(selectedOption: string) {
+    const isCorrect = selectedOption === currentDailyQuestion.correctAnswer;
+    setFeedback(isCorrect ? "Correct!" : "Incorrect.");
+
     try {
-      const response = await fetch('/api/ai/parse-exam', {
+      await fetch('/api/study/progress', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ fileId, courseId }),
+        body: JSON.stringify({
+          userId: currentUser.id,
+          questionId: currentDailyQuestion.id,
+          currentLevel: currentDailyQuestion.mastery_level || 1,
+          isCorrect: isCorrect,
+          examDate: examDate
+        })
       });
-
-      const data = await response.json();
-
-      if (!response.ok) {
-        throw new Error(data.error || 'Failed to extract questions.');
-      }
-
-      alert(data.message);
-      fetchData(); // Refresh the lists
-    } catch (error: any) {
-      console.error("Extraction Error:", error);
-      alert(error.message);
-    } finally {
-      setProcessingId(null);
+    } catch (error) {
+      console.error("Failed to update progress", error);
     }
-  };
+  }
 
-  if (loading) {
-    return <div className="min-h-screen flex items-center justify-center bg-gray-50 text-gray-500">Loading Exam Manager...</div>;
+  if (daysUntilExam === 0 && !unlockedStudy) {
+    return <ExamDayScreen onUnlockStudy={() => setUnlockedStudy(true)} />;
+  }
+
+  if (unlockedStudy) {
+    return (
+      <div className="max-w-4xl mx-auto pt-8 px-4 space-y-6">
+        <div className="bg-indigo-50 border border-indigo-200/80 text-indigo-900 p-5 rounded-2xl text-sm leading-relaxed">
+          <strong className="font-semibold block mb-1">Free Review Mode Active</strong>
+          The algorithm is taking the day off. Browse your notes, summaries, and course maps at your own pace without pressure or timer scores.
+        </div>
+        
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+          <a href="/matrix" className="p-6 bg-white rounded-2xl border border-slate-200/80 shadow-xs hover:border-indigo-400 transition block group">
+            <h3 className="text-lg font-bold text-slate-900 group-hover:text-indigo-600 transition-colors">Topic Matrix</h3>
+            <p className="text-slate-500 text-sm mt-1">Look over core concepts and exam breakdown across topics.</p>
+          </a>
+          
+          <a href="/simulation" className="p-6 bg-white rounded-2xl border border-slate-200/80 shadow-xs hover:border-indigo-400 transition block group">
+            <h3 className="text-lg font-bold text-slate-900 group-hover:text-indigo-600 transition-colors">Course Simulations</h3>
+            <p className="text-slate-500 text-sm mt-1">Freely review practice questions at your leisure.</p>
+          </a>
+        </div>
+      </div>
+    );
   }
 
   return (
-    <div className="min-h-screen bg-gray-100 py-8 px-4 sm:px-6 lg:px-8">
-      <div className="max-w-6xl mx-auto space-y-8">
+    <div className="max-w-4xl mx-auto pt-8 px-4 space-y-6">
+      <div className="flex items-center justify-between">
+        <div>
+          <h1 className="text-2xl sm:text-3xl font-bold text-slate-900 tracking-tight">Daily Study Planner</h1>
+          <p className="text-slate-500 text-sm mt-1">Your spaced repetition schedule for today.</p>
+        </div>
+        {daysUntilExam !== null && (
+          <div className="bg-indigo-50 text-indigo-700 px-4 py-2 rounded-2xl font-bold text-sm border border-indigo-100">
+            {daysUntilExam} Days Left
+          </div>
+        )}
+      </div>
+      
+      <div className="bg-white p-6 sm:p-8 rounded-2xl border border-slate-200/80 shadow-xs space-y-6">
+        <span className="text-xs font-bold uppercase tracking-wider text-indigo-600 bg-indigo-50 px-3 py-1 rounded-full">
+          Daily Review Question
+        </span>
         
-        {/* Header */}
-        <div className="bg-white rounded-xl shadow p-6 border-l-4 border-indigo-600">
-          <h1 className="text-2xl font-bold text-gray-900">Exam Extraction Manager</h1>
-          <p className="text-sm text-gray-500 mt-1">Process your uploaded past papers and view the AI-extracted practice questions.</p>
+        <h3 className="text-lg font-medium text-slate-800">{currentDailyQuestion.text}</h3>
+        
+        <div className="space-y-3">
+          {currentDailyQuestion.options.map((option: string) => (
+            <button 
+              key={option}
+              onClick={() => handleDailyReviewAnswer(option)}
+              className="w-full text-left p-4 border border-slate-200 rounded-xl hover:border-indigo-500 hover:bg-indigo-50/50 transition-all text-sm font-medium text-slate-700"
+            >
+              {option}
+            </button>
+          ))}
         </div>
 
-        {/* Uploaded Exams Table */}
-        <div className="bg-white rounded-xl shadow overflow-hidden">
-          <div className="px-6 py-4 border-b border-gray-200 bg-gray-50">
-            <h2 className="text-lg font-semibold text-gray-800">Uploaded Past Papers</h2>
+        {feedback && (
+          <div className={`p-4 rounded-xl border text-sm font-semibold ${
+            feedback.includes("Correct") 
+              ? "bg-emerald-50 text-emerald-800 border-emerald-200" 
+              : "bg-rose-50 text-rose-800 border-rose-200"
+          }`}>
+            {feedback}
           </div>
-          <div className="p-6">
-            {files.length === 0 ? (
-              <p className="text-gray-500 text-sm">No exam files uploaded yet.</p>
-            ) : (
-              <ul className="space-y-4">
-                {files.map(file => (
-                  <li key={file.id} className="flex items-center justify-between p-4 border border-gray-200 rounded-lg">
-                    <div>
-                      <p className="font-medium text-gray-900">{file.file_name}</p>
-                      <p className="text-xs text-gray-500">Status: <span className={file.ingestion_status === 'completed' ? 'text-green-600 font-semibold' : 'text-yellow-600 font-semibold'}>{file.ingestion_status.toUpperCase()}</span></p>
-                    </div>
-                    <button
-                      onClick={() => handleExtract(file.id, file.course_id)}
-                      disabled={processingId === file.id || file.ingestion_status === 'completed'}
-                      className={`px-4 py-2 rounded-md text-sm font-medium text-white transition-colors ${
-                        file.ingestion_status === 'completed' ? 'bg-gray-400 cursor-not-allowed' :
-                        processingId === file.id ? 'bg-indigo-400 cursor-wait' : 'bg-indigo-600 hover:bg-indigo-700'
-                      }`}
-                    >
-                      {processingId === file.id ? 'Extracting...' : file.ingestion_status === 'completed' ? 'Extracted' : 'Extract Questions'}
-                    </button>
-                  </li>
-                ))}
-              </ul>
-            )}
-          </div>
-        </div>
-
-        {/* Extracted Questions Grid */}
-        <div className="bg-white rounded-xl shadow overflow-hidden">
-          <div className="px-6 py-4 border-b border-gray-200 bg-gray-50 flex justify-between items-center">
-            <h2 className="text-lg font-semibold text-gray-800">Question Bank ({questions.length})</h2>
-          </div>
-          <div className="p-6">
-            {questions.length === 0 ? (
-              <p className="text-gray-500 text-sm">No questions extracted yet. Run an extraction above!</p>
-            ) : (
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                {questions.map((q) => (
-                  <div key={q.id} className="border border-gray-200 p-4 rounded-lg bg-gray-50 flex flex-col justify-between">
-                    <div>
-                      <div className="flex justify-between items-start mb-2">
-                        <span className="bg-blue-100 text-blue-800 text-xs font-semibold px-2 py-1 rounded">{q.topic || 'General'}</span>
-                        <span className={`text-xs font-semibold px-2 py-1 rounded ${
-                          q.difficulty === 'Hard' ? 'bg-red-100 text-red-800' :
-                          q.difficulty === 'Medium' ? 'bg-yellow-100 text-yellow-800' :
-                          'bg-green-100 text-green-800'
-                        }`}>{q.difficulty || 'Unrated'}</span>
-                      </div>
-                      <p className="text-sm text-gray-800 font-medium mb-4">{q.question_text}</p>
-                    </div>
-                    {q.solution_text && (
-                      <div className="mt-4 pt-3 border-t border-gray-200">
-                        <p className="text-xs text-gray-500 uppercase tracking-wide font-semibold mb-1">Solution:</p>
-                        <p className="text-sm text-gray-700 italic">{q.solution_text}</p>
-                      </div>
-                    )}
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
-        </div>
-
+        )}
       </div>
     </div>
   );
@@ -3263,148 +2192,201 @@ function ColorPicker({
 }
 </file>
 
-<file path="app/page.tsx">
-"use client";
+<file path="app/api/study/progress/route.ts">
+import { NextResponse } from 'next/server';
+// Import your Supabase client setup. Adjust the path if your lib folder is elsewhere.
+import { createClient } from '@supabase/supabase-js';
 
-import { useState } from "react";
-import { supabase } from "@/lib/supabaseClient";
-import { useRouter } from "next/navigation";
+// Initialize Supabase (Ensure your env variables are set correctly)
+const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL!;
+const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!;
+const supabase = createClient(supabaseUrl, supabaseKey);
 
-export default function LandingPage() {
-  const router = useRouter();
-  const [email, setEmail] = useState("");
-  const [password, setPassword] = useState("");
-  const [isSignUp, setIsSignUp] = useState(false);
-  const [loading, setLoading] = useState(false);
-  const [errorMsg, setErrorMsg] = useState<string | null>(null);
+const BASE_INTERVALS = {
+  1: 1,   // Day 1
+  2: 3,   // Day 3
+  3: 7,   // Day 7
+  4: 14,  // Day 14
+  5: 30,  // Day 30
+};
 
-  const handleAuth = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setLoading(true);
-    setErrorMsg(null);
+/**
+ * Calculates the next review date dynamically based on exam proximity.
+ */
+function calculateDynamicSpacedRepetition(
+  currentLevel: number, 
+  isCorrect: boolean, 
+  examDateString: string
+) {
+  let newLevel = currentLevel;
 
-    try {
-      if (isSignUp) {
-        const { error } = await supabase.auth.signUp({ email, password });
-        if (error) throw error;
-        alert("הרשמה בוצעה בהצלחה! ניתן להתחבר כעת.");
-        setIsSignUp(false);
-      } else {
-        const { error } = await supabase.auth.signInWithPassword({ email, password });
-        if (error) throw error;
-        router.push("/dashboard");
-      }
-    } catch (err: any) {
-      setErrorMsg(err.message || "שגיאה בתהליך ההתחברות");
-    } finally {
-      setLoading(false);
-    }
+  // 1. Adjust mastery level
+  if (isCorrect) {
+    newLevel = Math.min(5, currentLevel + 1);
+  } else {
+    newLevel = Math.max(1, currentLevel - 1);
+  }
+
+  // 2. Calculate days until the exam
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const examDate = new Date(examDateString);
+  examDate.setHours(0, 0, 0, 0);
+  
+  const timeDiff = examDate.getTime() - today.getTime();
+  const daysUntilExam = Math.max(1, Math.ceil(timeDiff / (1000 * 3600 * 24)));
+
+  // 3. Determine the compression scaling factor (Target timeline is 30 days)
+  const targetTimeline = 30; 
+  const scaleFactor = Math.min(1, daysUntilExam / targetTimeline);
+
+  // 4. Calculate dynamic days to add
+  const baseDays = BASE_INTERVALS[newLevel as keyof typeof BASE_INTERVALS] || 1;
+  let dynamicDaysToAdd = Math.round(baseDays * scaleFactor);
+  
+  // Cap the interval so it never schedules AFTER the exam, and never less than 1 day
+  dynamicDaysToAdd = Math.max(1, Math.min(dynamicDaysToAdd, daysUntilExam - 1));
+
+  // 5. Set the exact next review date
+  const nextReviewDate = new Date();
+  nextReviewDate.setDate(nextReviewDate.getDate() + dynamicDaysToAdd);
+
+  return {
+    newLevel,
+    nextReviewDate: nextReviewDate.toISOString(),
   };
-
-  return (
-    <div className="min-h-screen bg-gradient-to-b from-blue-50 to-white dir-rtl" dir="rtl">
-      {/* סרגל עליון */}
-      <header className="max-w-6xl mx-auto p-6 flex justify-between items-center">
-        <div className="flex items-center gap-2 font-extrabold text-2xl text-blue-600">
-          <span className="bg-blue-600 text-white px-3 py-1 rounded-xl text-base font-black">SS</span>
-          <span>Study Smarter</span>
-        </div>
-      </header>
-
-      {/* אזור ה-Hero והסבר על המערכת */}
-      <main className="max-w-6xl mx-auto px-6 py-12 grid grid-cols-1 md:grid-cols-2 gap-12 items-center">
-        <div className="space-y-6">
-          <span className="bg-blue-100 text-blue-800 text-xs font-bold px-3 py-1 rounded-full">
-            🚀 פלטפורמת ה-AI הבלעדית לסטודנטים
-          </span>
-          <h1 className="text-4xl font-extrabold text-gray-900 leading-tight">
-            ללמוד למבחנים חכם יותר, <br />
-            <span className="text-blue-600">100% מתואם לחומרי הקורס שלך.</span>
-          </h1>
-          <p className="text-gray-600 text-sm leading-relaxed">
-            SS - Study Smarter הופכת את סיכומי כתב היד, הסילבוסים ומבחני העבר שלך למאגר תרגול ממוקד.
-            אפס המצאות AI, בדיקה אוטומטית של פתרונות בכתב יד, ומפת חום של נושאי חובה בסיכון גבוה.
-          </p>
-
-          <div className="grid grid-cols-2 gap-4 pt-2">
-            <div className="bg-white p-4 rounded-xl border border-gray-100 shadow-sm">
-              <span className="text-xl">✍️</span>
-              <h3 className="font-bold text-xs mt-1">פענוח כתב יד</h3>
-              <p className="text-[11px] text-gray-500">העלאת מחברות בחינה וסריקות</p>
-            </div>
-            <div className="bg-white p-4 rounded-xl border border-gray-100 shadow-sm">
-              <span className="text-xl">🔥</span>
-              <h3 className="font-bold text-xs mt-1">מטריצת שכיחות</h3>
-              <p className="text-[11px] text-gray-500">זיהוי נושאי חובה בסיכון (80%+)</p>
-            </div>
-          </div>
-        </div>
-
-        {/* טופס התחברות / הרשמה */}
-        <div className="bg-white p-8 rounded-2xl border shadow-lg space-y-6 max-w-md mx-auto w-full">
-          <div>
-            <h2 className="text-xl font-bold text-gray-900">
-              {isSignUp ? "יצירת חשבון جديد" : "התחברות למערכת"}
-            </h2>
-            <p className="text-xs text-gray-500 mt-1">
-              {isSignUp ? "הרשם והתחל לנהל את הקורסים שלך" : "הכנס את הפרטים כדי לגשת לקורסים שלך"}
-            </p>
-          </div>
-
-          {errorMsg && (
-            <div className="p-3 bg-red-50 border border-red-200 text-red-700 text-xs rounded-lg">
-              {errorMsg}
-            </div>
-          )}
-
-          <form onSubmit={handleAuth} className="space-y-4">
-            <div>
-              <label className="text-xs font-bold text-gray-700 block mb-1">דוא"ל</label>
-              <input
-                type="email"
-                required
-                value={email}
-                onChange={(e) => setEmail(e.target.value)}
-                className="w-full p-2.5 border rounded-lg text-xs"
-                placeholder="student@university.ac.il"
-              />
-            </div>
-
-            <div>
-              <label className="text-xs font-bold text-gray-700 block mb-1">סיסמה</label>
-              <input
-                type="password"
-                required
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                className="w-full p-2.5 border rounded-lg text-xs"
-                placeholder="••••••••"
-              />
-            </div>
-
-            <button
-              type="submit"
-              disabled={loading}
-              className="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-3 rounded-lg text-xs transition shadow-md"
-            >
-              {loading ? "מעבד..." : isSignUp ? "ירשם כעת" : "התחבר לחשבון"}
-            </button>
-          </form>
-
-          <div className="text-center pt-2 border-t">
-            <button
-              type="button"
-              onClick={() => setIsSignUp(!isSignUp)}
-              className="text-xs font-bold text-blue-600 hover:underline"
-            >
-              {isSignUp ? "כבר נרשמת? התחבר כאן" : "אין לך חשבון? הרשם כעת"}
-            </button>
-          </div>
-        </div>
-      </main>
-    </div>
-  );
 }
+
+export async function POST(req: Request) {
+  try {
+    const body = await req.json();
+    const { userId, questionId, currentLevel, isCorrect, examDate } = body;
+
+    // Validate inputs
+    if (!userId || !questionId || currentLevel === undefined || isCorrect === undefined || !examDate) {
+      return NextResponse.json({ error: 'Missing required fields' }, { status: 400 });
+    }
+
+    // Calculate the new level and next review date
+    const { newLevel, nextReviewDate } = calculateDynamicSpacedRepetition(
+      currentLevel,
+      isCorrect,
+      examDate
+    );
+
+    // Upsert the progress into the user_question_progress table
+    const { data, error } = await supabase
+      .from('user_question_progress')
+      .upsert({
+        user_id: userId,
+        question_id: questionId,
+        mastery_level: newLevel,
+        next_review_date: nextReviewDate,
+        last_reviewed_at: new Date().toISOString(),
+      }, { onConflict: 'user_id, question_id' })
+      .select()
+      .single();
+
+    if (error) {
+      console.error('Supabase error updating progress:', error);
+      return NextResponse.json({ error: 'Failed to save progress' }, { status: 500 });
+    }
+
+    return NextResponse.json({ 
+      success: true, 
+      newLevel, 
+      nextReviewDate,
+      data
+    });
+
+  } catch (error) {
+    console.error('API Error:', error);
+    return NextResponse.json({ error: 'Internal server error' }, { status: 500 });
+  }
+}
+</file>
+
+<file path="lib/translations.ts">
+export type Language = 'he' | 'en';
+
+export type TranslationKey = 
+  | 'brandName'
+  | 'navPlan'
+  | 'navMatrix'
+  | 'navSimulation'
+  | 'navUpload'
+  | 'navMyCourses'
+  | 'loginTitle'
+  | 'signupTitle'
+  | 'loginSubtitle'
+  | 'signupSubtitle'
+  | 'emailLabel'
+  | 'passwordLabel'
+  | 'submitLogin'
+  | 'submitSignup'
+  | 'toggleSignup'
+  | 'toggleLogin'
+  | 'matrixTitle'
+  | 'matrixSubtitle'
+  | 'syllabusTopic'
+  | 'solvedSuccess'
+  | 'needsReview'
+  | 'noQuestion';
+
+export const translations: Record<Language, Record<TranslationKey, string>> = {
+  he: {
+    brandName: 'Study Smarter',
+    navPlan: 'תוכנית לימודים',
+    navMatrix: 'מטריצת נושאים',
+    navSimulation: 'סימולציה',
+    navUpload: 'העלאת מבחן',
+    navMyCourses: '← הקורסים שלי',
+
+    loginTitle: 'התחברות למערכת',
+    signupTitle: 'יצירת חשבון חדש',
+    loginSubtitle: 'הכנס את הפרטים כדי לגשת לקורסים שלך',
+    signupSubtitle: 'הרשם והתחל לנהל את הקורסים שלך',
+    emailLabel: 'דוא"ל',
+    passwordLabel: 'סיסמה',
+    submitLogin: 'התחבר לחשבון',
+    submitSignup: 'הרשם כעת',
+    toggleSignup: 'אין לך חשבון? הרשם כעת',
+    toggleLogin: 'כבר נרשמת? התחבר כאן',
+
+    matrixTitle: 'מטריצת נושאי הבחינות',
+    matrixSubtitle: 'לחץ על נושא בסילבוס כדי להתחיל לתרגל את השאלות המקושרות אליו.',
+    syllabusTopic: 'נושא בסילבוס',
+    solvedSuccess: 'נפתר בהצלחה',
+    needsReview: 'נדרשת חזרה',
+    noQuestion: 'ללא שאלה',
+  },
+  en: {
+    brandName: 'Study Smarter',
+    navPlan: 'Study Plan',
+    navMatrix: 'Topic Matrix',
+    navSimulation: 'Simulation',
+    navUpload: 'Upload Exam',
+    navMyCourses: '← My Courses',
+
+    loginTitle: 'Login to System',
+    signupTitle: 'Create New Account',
+    loginSubtitle: 'Enter your credentials to access your courses',
+    signupSubtitle: 'Register and start managing your courses',
+    emailLabel: 'Email',
+    passwordLabel: 'Password',
+    submitLogin: 'Login',
+    submitSignup: 'Register Now',
+    toggleSignup: "Don't have an account? Register now",
+    toggleLogin: 'Already registered? Login here',
+
+    matrixTitle: 'Topic Mastery Matrix',
+    matrixSubtitle: 'Click on a syllabus topic to practice questions linked to it.',
+    syllabusTopic: 'Syllabus Topic',
+    solvedSuccess: 'Solved Successfully',
+    needsReview: 'Needs Review',
+    noQuestion: 'No Question',
+  },
+};
 </file>
 
 <file path="app/dashboard/page.tsx">
@@ -3541,132 +2523,6 @@ export default function UserDashboard() {
             </Link>
           ))
         )}
-      </div>
-    </div>
-  );
-}
-</file>
-
-<file path="app/matrix/page.tsx">
-"use client";
-
-import { useEffect, useState } from "react";
-import { getCourseMatrixAndAnalytics, MatrixAnalyticsResult } from "@/lib/services/analyticsService";
-import { supabase } from "@/lib/supabaseClient";
-
-export default function MatrixPage() {
-  const [data, setData] = useState<MatrixAnalyticsResult | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [courseId, setCourseId] = useState<string | null>(null);
-
-  useEffect(() => {
-    async function init() {
-      // שליפת הקורס הפילי
-      const { data: courses } = await supabase.from("courses").select("id").limit(1);
-      if (courses && courses.length > 0) {
-        setCourseId(courses[0].id);
-        const matrixData = await getCourseMatrixAndAnalytics(courses[0].id);
-        setData(matrixData);
-      }
-      setLoading(false);
-    }
-    init();
-  }, []);
-
-  if (loading) {
-    return <div className="p-8 text-center dir-rtl" dir="rtl">טוען את הטבלה המצליבה...</div>;
-  }
-
-  if (!data || data.matrixRows.length === 0) {
-    return (
-      <div className="p-8 text-center dir-rtl" dir="rtl">
-        <h2 className="text-xl font-bold">לא נמצאו נתונים</h2>
-        <p className="text-gray-500 text-sm mt-2">יש להעלות סילבוס ומבחנים במסך ה-Setup תחילה.</p>
-      </div>
-    );
-  }
-
-  return (
-    <div className="max-w-7xl mx-auto p-6 dir-rtl" dir="rtl">
-      <div className="mb-6">
-        <h1 className="text-2xl font-bold text-gray-900">📊 מטריצה מצליבה: נושאים מול מועדי מבחנים</h1>
-        <p className="text-xs text-gray-500 mt-1">
-          הטבלה מציגה את השאלות המדויקות מכל מועד ומזהה אוטומטית נושאי חובה המופיעים באופן קבוע במבחנים.
-        </p>
-      </div>
-
-      <div className="overflow-x-auto bg-white rounded-xl border shadow-sm">
-        <table className="w-full text-sm text-right border-collapse">
-          <thead>
-            <tr className="bg-gray-100 border-b text-gray-700">
-              <th className="p-4 border-l font-bold min-w-[220px]">נושא בסילבוס</th>
-              <th className="p-4 border-l font-bold text-center w-28">שכיחות</th>
-              {data.exams.map((exam) => (
-                <th key={exam.id} className="p-4 border-l font-bold text-center min-w-[120px]">
-                  {exam.year} {exam.term}
-                </th>
-              ))}
-            </tr>
-          </thead>
-          <tbody>
-            {data.matrixRows.map((row) => (
-              <tr
-                key={row.topicId}
-                className={`border-b hover:bg-gray-50 transition-colors ${
-                  row.isMandatory ? "bg-red-50/40" : ""
-                }`}
-              >
-                {/* שם הנושא ותגית נושא חובה */}
-                <td className="p-4 border-l">
-                  <div className="font-bold text-gray-800">{row.topicTitle}</div>
-                  {row.isMandatory && (
-                    <span className="inline-block mt-1 bg-red-600 text-white text-[10px] font-extrabold px-2 py-0.5 rounded-full">
-                      🔥 נושא חובה במבחנים (סבירות גבוהה)
-                    </span>
-                  )}
-                </td>
-
-                {/* אחוז שכיחות */}
-                <td className="p-4 border-l text-center font-bold">
-                  <span
-                    className={`inline-block px-2.5 py-1 rounded-full text-xs ${
-                      row.isMandatory
-                        ? "bg-red-100 text-red-800"
-                        : row.appearancePercentage >= 50
-                        ? "bg-yellow-100 text-yellow-800"
-                        : "bg-gray-100 text-gray-600"
-                    }`}
-                  >
-                    {row.appearancePercentage}%
-                  </span>
-                </td>
-
-                {/* שאלות לפי מועדים */}
-                {data.exams.map((exam) => {
-                  const qNumbers = row.examQuestionsMap[exam.id];
-                  return (
-                    <td key={exam.id} className="p-4 border-l text-center">
-                      {qNumbers && qNumbers.length > 0 ? (
-                        <div className="flex flex-wrap gap-1 justify-center">
-                          {qNumbers.map((qNum) => (
-                            <span
-                              key={qNum}
-                              className="bg-blue-100 text-blue-900 border border-blue-200 font-semibold px-2 py-0.5 rounded text-xs"
-                            >
-                              שאלה {qNum}
-                            </span>
-                          ))}
-                        </div>
-                      ) : (
-                        <span className="text-gray-300 text-xs">—</span>
-                      )}
-                    </td>
-                  );
-                })}
-              </tr>
-            ))}
-          </tbody>
-        </table>
       </div>
     </div>
   );
@@ -3823,48 +2679,146 @@ export default function FocusedPracticeWithTracking() {
 }
 </file>
 
-<file path="app/layout.tsx">
-import type { Metadata } from "next";
-import "./globals.css";
-import Link from "next/link";
+<file path="app/page.tsx">
+"use client";
 
-export const metadata: Metadata = {
-  title: "SS - Study Smarter",
-  description: "מערכת למידה ותרגול חכמה המבוססת על חומרי הקורס בלבד",
-};
+import { useState } from "react";
+import { supabase } from "@/lib/supabaseClient";
+import { useRouter } from "next/navigation";
 
-export default function RootLayout({
-  children,
-}: {
-  children: React.ReactNode;
-}) {
+export default function LandingPage() {
+  const router = useRouter();
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [isSignUp, setIsSignUp] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [errorMsg, setErrorMsg] = useState<string | null>(null);
+
+  const handleAuth = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setLoading(true);
+    setErrorMsg(null);
+
+    try {
+      if (isSignUp) {
+        const { error } = await supabase.auth.signUp({ email, password });
+        if (error) throw error;
+        alert("הרשמה בוצעה בהצלחה! ניתן להתחבר כעת.");
+        setIsSignUp(false);
+      } else {
+        const { error } = await supabase.auth.signInWithPassword({ email, password });
+        if (error) throw error;
+        router.push("/plan");
+      }
+    } catch (err: any) {
+      setErrorMsg(err.message || "שגיאה בתהליך ההתחברות");
+    } finally {
+      setLoading(false);
+    }
+  };
+
   return (
-    <html lang="he" dir="rtl">
-      <body className="bg-gray-50 min-h-screen text-gray-900 font-sans">
-        {/* סרגל ניווט ראשי (Navbar) */}
-        <header className="bg-white border-b sticky top-0 z-50 shadow-sm">
-          <div className="max-w-6xl mx-auto px-6 h-16 flex justify-between items-center">
-            {/* מותג ושם התוכנה */}
-            <Link href="/" className="flex items-center gap-2 font-extrabold text-xl text-blue-600">
-              <span className="bg-blue-600 text-white px-2.5 py-1 rounded-lg text-sm font-black shadow-sm">
-                SS
-              </span>
-              <span>Study Smarter</span>
-            </Link>
+    <div className="min-h-screen bg-gradient-to-b from-blue-50 to-white dir-rtl" dir="rtl">
+      {/* Top Header */}
+      <header className="max-w-6xl mx-auto p-6 flex justify-between items-center">
+        <div className="flex items-center gap-2 font-extrabold text-2xl text-blue-600">
+          <span className="bg-blue-600 text-white px-3 py-1 rounded-xl text-base font-black">SS</span>
+          <span>Study Smarter</span>
+        </div>
+      </header>
 
-            {/* קישורי ניווט */}
-            <nav className="flex items-center gap-6 text-xs font-bold text-gray-600">
-              <Link href="/setup" className="hover:text-blue-600 transition">⚙️ הקמת קורס</Link>
-              <Link href="/matrix" className="hover:text-blue-600 transition">📊 מטריצה</Link>
-              <Link href="/study/focused" className="hover:text-blue-600 transition">🎯 תרגול ממוקד</Link>
-              <Link href="/exam/simulation" className="hover:text-blue-600 transition">📝 סימולטור מבחן</Link>
-            </nav>
+      {/* Hero & Information Section */}
+      <main className="max-w-6xl mx-auto px-6 py-12 grid grid-cols-1 md:grid-cols-2 gap-12 items-center">
+        <div className="space-y-6">
+          <span className="bg-blue-100 text-blue-800 text-xs font-bold px-3 py-1 rounded-full">
+            🚀 פלטפורמת ה-AI הבלעדית לסטודנטים
+          </span>
+          <h1 className="text-4xl font-extrabold text-gray-900 leading-tight">
+            ללמוד למבחנים חכם יותר, <br />
+            <span className="text-blue-600">100% מתואם לחומרי הקורס שלך.</span>
+          </h1>
+          <p className="text-gray-600 text-sm leading-relaxed">
+            SS - Study Smarter הופכת את סיכומי כתב היד, הסילבוסים ומבחני העבר שלך למאגר תרגול ממוקד.
+            אפס המצאות AI, בדיקה אוטומטית של פתרונות בכתב יד, ומפת חום של נושאי חובה בסיכון גבוה.
+          </p>
+
+          <div className="grid grid-cols-2 gap-4 pt-2">
+            <div className="bg-white p-4 rounded-xl border border-gray-100 shadow-sm">
+              <span className="text-xl">✍️</span>
+              <h3 className="font-bold text-xs mt-1">פענוח כתב יד</h3>
+              <p className="text-[11px] text-gray-500">העלאת מחברות בחינה וסריקות</p>
+            </div>
+            <div className="bg-white p-4 rounded-xl border border-gray-100 shadow-sm">
+              <span className="text-xl">🔥</span>
+              <h3 className="font-bold text-xs mt-1">מטריצת שכיחות</h3>
+              <p className="text-[11px] text-gray-500">זיהוי נושאי חובה בסיכון (80%+)</p>
+            </div>
           </div>
-        </header>
+        </div>
 
-        <main>{children}</main>
-      </body>
-    </html>
+        {/* Auth Form Card */}
+        <div className="bg-white p-8 rounded-2xl border shadow-lg space-y-6 max-w-md mx-auto w-full">
+          <div>
+            <h2 className="text-xl font-bold text-gray-900">
+              {isSignUp ? "יצירת חשבון חדש" : "התחברות למערכת"}
+            </h2>
+            <p className="text-xs text-gray-500 mt-1">
+              {isSignUp ? "הרשם והתחל לנהל את הקורסים שלך" : "הכנס את הפרטים כדי לגשת לקורסים שלך"}
+            </p>
+          </div>
+
+          {errorMsg && (
+            <div className="p-3 bg-red-50 border border-red-200 text-red-700 text-xs rounded-lg">
+              {errorMsg}
+            </div>
+          )}
+
+          <form onSubmit={handleAuth} className="space-y-4">
+            <div>
+              <label className="text-xs font-bold text-gray-700 block mb-1">דוא"ל</label>
+              <input
+                type="email"
+                required
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+                className="w-full p-2.5 border rounded-lg text-xs focus:ring-2 focus:ring-blue-500 focus:outline-none"
+                placeholder="student@university.ac.il"
+              />
+            </div>
+
+            <div>
+              <label className="text-xs font-bold text-gray-700 block mb-1">סיסמה</label>
+              <input
+                type="password"
+                required
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                className="w-full p-2.5 border rounded-lg text-xs focus:ring-2 focus:ring-blue-500 focus:outline-none"
+                placeholder="••••••••"
+              />
+            </div>
+
+            <button
+              type="submit"
+              disabled={loading}
+              className="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-3 rounded-lg text-xs transition shadow-md"
+            >
+              {loading ? "מעבד..." : isSignUp ? "הרשם כעת" : "התחבר לחשבון"}
+            </button>
+          </form>
+
+          <div className="text-center pt-2 border-t">
+            <button
+              type="button"
+              onClick={() => setIsSignUp(!isSignUp)}
+              className="text-xs font-bold text-blue-600 hover:underline"
+            >
+              {isSignUp ? "כבר נרשמת? התחבר כאן" : "אין לך חשבון? הרשם כעת"}
+            </button>
+          </div>
+        </div>
+      </main>
+    </div>
   );
 }
 </file>
@@ -4073,313 +3027,257 @@ export async function parseExamQuestions(
 }
 </file>
 
-<file path="app/setup/page.tsx">
-"use client";
+<file path="app/components/Navbar.tsx">
+'use client';
 
-import { useEffect, useState } from "react";
-import { supabase } from "@/lib/supabaseClient";
-import Link from "next/link";
+import Link from 'next/link';
+import { usePathname } from 'next/navigation';
+import { useLanguage } from '@/app/context/LanguageContext';
 
-interface Course {
-  id: string;
-  name: string;
-  code: string;
-  created_at?: string;
-}
+export default function Navbar() {
+  const pathname = usePathname();
+  const { lang, toggleLanguage, t } = useLanguage();
 
-export default function SetupPage() {
-  const [courses, setCourses] = useState<Course[]>([]);
-  const [courseName, setCourseName] = useState("");
-  const [courseCode, setCourseCode] = useState("");
-  const [activeCourseId, setActiveCourseId] = useState<string | null>(null);
+  const isDashboard = pathname === '/dashboard' || pathname === '/';
 
-  // קבצים
-  const [syllabusFile, setSyllabusFile] = useState<File | null>(null);
-  const [summaryFiles, setSummaryFiles] = useState<FileList | null>(null);
-
-  // מצבי טעינה והודעות
-  const [loadingCourses, setLoadingCourses] = useState(true);
-  const [creating, setCreating] = useState(false);
-  const [uploadingSyllabus, setUploadingSyllabus] = useState(false);
-  const [uploadingSummaries, setUploadingSummaries] = useState(false);
-  const [statusMessage, setStatusMessage] = useState<string | null>(null);
-
-  // שליפת כל הקורסים הקיימים במערכת
-  const fetchCourses = async () => {
-    setLoadingCourses(true);
-    const { data, error } = await supabase
-      .from("courses")
-      .select("*")
-      .order("created_at", { ascending: false });
-
-    if (!error && data) {
-      setCourses(data);
-      if (data.length > 0 && !activeCourseId) {
-        setActiveCourseId(data[0].id);
-      }
-    }
-    setLoadingCourses(false);
-  };
-
-  useEffect(() => {
-    fetchCourses();
-  }, []);
-
-  // יצירת קורס חדש
-  const handleCreateCourse = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!courseName) return;
-
-    setCreating(true);
-    setStatusMessage(null);
-
-    try {
-      const { data, error } = await supabase
-        .from("courses")
-        .insert({ name: courseName, code: courseCode })
-        .select()
-        .single();
-
-      if (error) throw error;
-
-      setStatusMessage(`✅ הקורס "${data.name}" נוצר בהצלחה!`);
-      setCourseName("");
-      setCourseCode("");
-      setActiveCourseId(data.id);
-      await fetchCourses();
-    } catch (err: any) {
-      setStatusMessage(`❌ שגיאה ביצירת הקורס: ${err.message}`);
-    } finally {
-      setCreating(false);
-    }
-  };
-
-  // העלאת סילבוס
-  const handleUploadSyllabus = async (cId: string) => {
-    if (!syllabusFile) return;
-    setUploadingSyllabus(true);
-    setStatusMessage("מנתח סילבוס ומחלץ נושאים...");
-
-    const formData = new FormData();
-    formData.append("courseId", cId);
-    formData.append("file", syllabusFile);
-
-    try {
-      const res = await fetch("/api/ingest/syllabus", { method: "POST", body: formData });
-      const data = await res.json();
-      if (data.success) {
-        setStatusMessage("✅ הסילבוס עובד ועץ הנושאים חולץ בהצלחה!");
-        setSyllabusFile(null);
-      } else {
-        setStatusMessage(`❌ שגיאה: ${data.error}`);
-      }
-    } catch {
-      setStatusMessage("❌ שגיאה בזמן עיבוד הסילבוס.");
-    } finally {
-      setUploadingSyllabus(false);
-    }
-  };
-
-  // העלאת ספר / סיכומים בכתב יד
-  const handleUploadSummaries = async (cId: string) => {
-    if (!summaryFiles || summaryFiles.length === 0) return;
-    setUploadingSummaries(true);
-    setStatusMessage("מפענח כתב יד ומאחד את ספר הקורס והסיכומים...");
-
-    const formData = new FormData();
-    formData.append("courseId", cId);
-    Array.from(summaryFiles).forEach((f) => formData.append("files", f));
-
-    try {
-      const res = await fetch("/api/ingest/summaries", { method: "POST", body: formData });
-      const data = await res.json();
-      if (data.success) {
-        setStatusMessage("✅ הסיכומים וספר הקורס פוענחו ונשמרו בהצלחה!");
-        setSummaryFiles(null);
-      } else {
-        setStatusMessage(`❌ שגיאה: ${data.error}`);
-      }
-    } catch {
-      setStatusMessage("❌ שגיאה בפענוח הסיכומים.");
-    } finally {
-      setUploadingSummaries(false);
-    }
-  };
+  const navItems = [
+    { name: t('navPlan'), href: '/plan' },
+    { name: t('navMatrix'), href: '/matrix' },
+    { name: t('navSimulation'), href: '/simulation' },
+    { name: t('navUpload'), href: '/upload-exam' },
+  ];
 
   return (
-    <div className="max-w-5xl mx-auto p-6 dir-rtl space-y-8" dir="rtl">
-      {/* כותרת ראשית */}
-      <div className="text-center space-y-1">
-        <h1 className="text-2xl font-bold text-gray-900 flex items-center justify-center gap-2">
-          ⚙️ הקמת קורס והעלאת חומרי לימוד
-        </h1>
-        <p className="text-xs text-gray-500">
-          הגדירו את הקורס והעלו סילבוס, מבחנים וסיכומים (כולל סריקות בכתב יד) לבניית מאגר הידע.
-        </p>
-      </div>
+    <header className="sticky top-0 z-50 backdrop-blur-md bg-white/80 border-b border-slate-200/80">
+      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+        <div className="flex items-center justify-between h-16">
+          {/* Logo */}
+          <Link href="/dashboard" className="flex items-center gap-2.5 font-bold text-xl text-slate-900 tracking-tight">
+            <span className="flex items-center justify-center px-2 py-1 rounded-xl bg-indigo-600 text-white font-black text-xs shadow-sm shadow-indigo-200">
+              SS
+            </span>
+            <span>{t('brandName')}</span>
+          </Link>
 
-      {statusMessage && (
-        <div className="p-3 bg-blue-50 border border-blue-200 rounded-xl text-xs font-semibold text-blue-900 text-center shadow-sm">
-          {statusMessage}
-        </div>
-      )}
-
-      {/* טופס יצירת קורס חדש */}
-      <div className="bg-white p-6 rounded-2xl border border-gray-200 shadow-sm space-y-4">
-        <h2 className="text-sm font-bold text-gray-800">1. פרטי הקורס</h2>
-        <form onSubmit={handleCreateCourse} className="grid grid-cols-1 md:grid-cols-3 gap-3">
-          <input
-            type="text"
-            placeholder="שם הקורס (למשל: פיזיקה)"
-            value={courseName}
-            onChange={(e) => setCourseName(e.target.value)}
-            className="p-3 border rounded-xl text-xs w-full focus:outline-none focus:ring-2 focus:ring-blue-500"
-            required
-          />
-          <input
-            type="text"
-            placeholder="מספר / קוד הקורס (למשל: 11111111111)"
-            value={courseCode}
-            onChange={(e) => setCourseCode(e.target.value)}
-            className="p-3 border rounded-xl text-xs w-full focus:outline-none focus:ring-2 focus:ring-blue-500"
-          />
-          <button
-            type="submit"
-            disabled={creating}
-            className="bg-blue-600 hover:bg-blue-700 disabled:bg-gray-300 text-white font-bold text-xs rounded-xl p-3 transition shadow-md"
-          >
-            {creating ? "יוצר קורס..." : "צור קורס חדש"}
-          </button>
-        </form>
-      </div>
-
-      {/* רשימת הקורסים שהוקמו במערכת */}
-      <div className="space-y-6">
-        <h2 className="text-lg font-bold text-gray-900 border-b pb-2">
-          📚 הקורסים הפעילים במערכת ({courses.length})
-        </h2>
-
-        {loadingCourses ? (
-          <div className="text-center py-8 text-xs text-gray-500">טוען קורסים...</div>
-        ) : courses.length === 0 ? (
-          <div className="text-center p-8 bg-gray-50 rounded-2xl border text-xs text-gray-500">
-            עדיין לא הוקמו קורסים. הזיני שם ומספר קורס למעלה ולחצי "צור קורס חדש".
-          </div>
-        ) : (
-          courses.map((course) => {
-            const isExpanded = activeCourseId === course.id;
-
-            return (
-              <div
-                key={course.id}
-                className={`bg-white rounded-2xl border transition-all shadow-sm overflow-hidden ${
-                  isExpanded ? "border-blue-500 ring-2 ring-blue-100" : "border-gray-200"
-                }`}
-              >
-                {/* כותרת התיבה: שם הקורס - מספר הקורס */}
-                <div
-                  onClick={() => setActiveCourseId(isExpanded ? null : course.id)}
-                  className="p-5 bg-gradient-to-r from-blue-50/40 to-white flex justify-between items-center cursor-pointer hover:bg-blue-50/60 transition"
+          {/* Nav Items & Language Switcher */}
+          <div className="flex items-center gap-2">
+            {!isDashboard && (
+              <nav className="flex items-center gap-1 sm:gap-2">
+                <Link
+                  href="/dashboard"
+                  className="px-3 py-1.5 rounded-xl text-sm font-medium text-slate-600 hover:text-slate-900 hover:bg-slate-100 transition-all mr-2 border-r border-slate-200 pr-4"
                 >
-                  <div className="flex items-center gap-3">
-                    <span className="text-xl">📖</span>
-                    <div>
-                      <h3 className="text-base font-extrabold text-gray-900">
-                        {course.name} {course.code ? `- ${course.code}` : ""}
-                      </h3>
-                      <p className="text-[11px] text-gray-500 mt-0.5">
-                        מזהה קורס: {course.id.slice(0, 8)}...
-                      </p>
-                    </div>
-                  </div>
-                  <span className="text-xs font-bold text-blue-600 bg-white border px-3 py-1.5 rounded-xl shadow-sm">
-                    {isExpanded ? "סגור חומרים ▲" : "נהל קורס וחלץ חומרים ▼"}
-                  </span>
-                </div>
+                  {t('navMyCourses')}
+                </Link>
 
-                {/* תוכן התיבה - העלאות וגישה לכל הפיצ'רים */}
-                {isExpanded && (
-                  <div className="p-6 border-t space-y-6 bg-gray-50/30">
-                    {/* סרגל קישורים מהירים לפיצ'רים של הקורס */}
-                    <div>
-                      <span className="text-xs font-bold text-gray-700 block mb-2">
-                        🚀 פעולות ותרגול עבור קורס זה:
-                      </span>
-                      <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
-                        <Link
-                          href={`/matrix?courseId=${course.id}`}
-                          className="bg-white border hover:border-blue-500 p-2.5 rounded-xl text-center text-xs font-bold text-gray-800 shadow-sm transition"
-                        >
-                          📊 מטריצת שכיחות
-                        </Link>
-                        <Link
-                          href={`/study/focused?courseId=${course.id}`}
-                          className="bg-white border hover:border-blue-500 p-2.5 rounded-xl text-center text-xs font-bold text-gray-800 shadow-sm transition"
-                        >
-                          🎯 תרגול ממוקד
-                        </Link>
-                        <Link
-                          href={`/exam/simulation?courseId=${course.id}`}
-                          className="bg-white border hover:border-blue-500 p-2.5 rounded-xl text-center text-xs font-bold text-gray-800 shadow-sm transition"
-                        >
-                          📝 סימולטור מבחן
-                        </Link>
-                        <Link
-                          href={`/flashcards?courseId=${course.id}`}
-                          className="bg-white border hover:border-blue-500 p-2.5 rounded-xl text-center text-xs font-bold text-gray-800 shadow-sm transition"
-                        >
-                          🎴 פלאשקארטס
-                        </Link>
-                      </div>
-                    </div>
+                {navItems.map((item) => {
+                  const isActive = pathname.startsWith(item.href);
+                  return (
+                    <Link
+                      key={item.href}
+                      href={item.href}
+                      className={`px-3 py-1.5 rounded-xl text-sm font-medium transition-all ${
+                        isActive
+                          ? 'bg-indigo-50 text-indigo-600 font-semibold shadow-2xs'
+                          : 'text-slate-600 hover:text-slate-900 hover:bg-slate-100'
+                      }`}
+                    >
+                      {item.name}
+                    </Link>
+                  );
+                })}
+              </nav>
+            )}
 
-                    {/* טפסי העלאת חומרים לקורס הספציפי הזה */}
-                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4 pt-2">
-                      {/* העלאת סילבוס */}
-                      <div className="bg-white p-4 rounded-xl border space-y-3">
-                        <h4 className="text-xs font-bold text-gray-800">📄 העלאת סילבוס (חילוץ נושאים)</h4>
-                        <input
-                          type="file"
-                          accept="application/pdf"
-                          onChange={(e) => setSyllabusFile(e.target.files?.[0] || null)}
-                          className="block w-full text-[11px] text-gray-500 file:mr-2 file:py-1.5 file:px-3 file:rounded-lg file:border-0 file:text-xs file:font-semibold file:bg-blue-50 file:text-blue-700"
-                        />
-                        <button
-                          onClick={() => handleUploadSyllabus(course.id)}
-                          disabled={uploadingSyllabus || !syllabusFile}
-                          className="w-full bg-gray-900 hover:bg-gray-800 disabled:bg-gray-300 text-white font-bold text-xs py-2 rounded-lg transition"
-                        >
-                          {uploadingSyllabus ? "מנתח..." : "עבד סילבוס"}
-                        </button>
-                      </div>
+            {/* Language Switch Button */}
+            <button
+              onClick={toggleLanguage}
+              className="px-3 py-1.5 rounded-xl border border-slate-200 bg-white text-xs font-bold text-slate-700 hover:bg-slate-50 transition-all flex items-center gap-1.5 shadow-2xs"
+            >
+              <span>🌐</span>
+              <span>{lang === 'he' ? 'English' : 'עברית'}</span>
+            </button>
+          </div>
+        </div>
+      </div>
+    </header>
+  );
+}
+</file>
 
-                      {/* העלאת ספר קורס / סיכומים בכתב יד */}
-                      <div className="bg-white p-4 rounded-xl border space-y-3">
-                        <h4 className="text-xs font-bold text-gray-800">✍️ העלאת ספר/סיכומים בכתב יד</h4>
-                        <input
-                          type="file"
-                          multiple
-                          accept="application/pdf,image/*"
-                          onChange={(e) => setSummaryFiles(e.target.files)}
-                          className="block w-full text-[11px] text-gray-500 file:mr-2 file:py-1.5 file:px-3 file:rounded-lg file:border-0 file:text-xs file:font-semibold file:bg-blue-50 file:text-blue-700"
-                        />
-                        <button
-                          onClick={() => handleUploadSummaries(course.id)}
-                          disabled={uploadingSummaries || !summaryFiles}
-                          className="w-full bg-blue-600 hover:bg-blue-700 disabled:bg-gray-300 text-white font-bold text-xs py-2 rounded-lg transition"
+<file path="app/matrix/page.tsx">
+'use client';
+
+import { useState, useEffect } from 'react';
+import Link from 'next/link';
+import { useLanguage } from '@/app/context/LanguageContext';
+
+export default function TopicMatrixPage() {
+  const { t, dir } = useLanguage();
+  const [matrixData, setMatrixData] = useState<any>(null);
+
+  useEffect(() => {
+    setMatrixData({
+      exams: [
+        { id: 'e1', title: '2020 אמריקאי מועד א' },
+        { id: 'e2', title: '2021 אמריקאי מועד ב' }
+      ],
+      topics: [
+        { id: 't1', num: 1, name: 'וקטורים, מכפלה פנימית ומכפלה וקטורית' },
+        { id: 't2', num: 2, name: 'גיאומטריה אנליטית – מישורים וישרים' },
+        { id: 't3', num: 3, name: 'משטחים ריבועיים' },
+        { id: 't4', num: 4, name: 'פונקציות – גבולות ורציפות' },
+        { id: 't5', num: 5, name: 'דיפרנציאביליות, נגזרות חלקיות, נגזרות מכוונות, כלל השרשרת, הגרדיאנט' },
+        { id: 't6', num: 6, name: 'פולינום טיילור, משפט הפונקציות הסתומות' },
+        { id: 't7', num: 7, name: 'קיצון וקיצון מקומי, אפיון קיצון מקומי, כופלי לגרנז' },
+        { id: 't8', num: 8, name: 'אינטגרל כפול' },
+        { id: 't9', num: 9, name: 'אינטגרל משולש' },
+        { id: 't10', num: 10, name: 'אינטגרל קווי מסוג ראשון ושני. משפט גרין, שדה משמר במישור' },
+        { id: 't11', num: 11, name: 'אינטגרל משטחי מסוג ראשון ושני' },
+        { id: 't12', num: 12, name: 'משפט גאוס ומשפט סטוקס' }
+      ],
+      questions: [
+        { id: 'q1', q_number: '1', exam_id: 'e1', topic_id: 't1', status: 'correct' },
+        { id: 'q2', q_number: '3', exam_id: 'e1', topic_id: 't5', status: 'correct' },
+        { id: 'q3', q_number: '6', exam_id: 'e1', topic_id: 't6', status: 'correct' },
+        { id: 'q4', q_number: '5', exam_id: 'e1', topic_id: 't7', status: 'correct' },
+        { id: 'q5', q_number: '2', exam_id: 'e1', topic_id: 't8', status: 'correct' },
+        { id: 'q6', q_number: '4', exam_id: 'e1', topic_id: 't9', status: 'correct' }
+      ]
+    });
+  }, []);
+
+  if (!matrixData) {
+    return (
+      <div className="min-h-[60vh] flex items-center justify-center" dir={dir}>
+        <div className="text-slate-400 font-medium animate-pulse">Loading...</div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="max-w-7xl mx-auto pt-6 px-4 sm:px-6 lg:px-8 space-y-6" dir={dir}>
+      {/* Header Bar */}
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-slate-200 pb-4">
+        <div>
+          <h1 className="text-2xl sm:text-3xl font-bold text-slate-900 tracking-tight">
+            {t('matrixTitle')}
+          </h1>
+          <p className="text-slate-500 text-sm mt-1">
+            {t('matrixSubtitle')}
+          </p>
+        </div>
+
+        {/* Legend */}
+        <div className="flex items-center gap-4 bg-white px-4 py-2 rounded-xl border border-slate-200 text-xs font-medium text-slate-600 shadow-2xs">
+          <span className="flex items-center gap-1.5">
+            <span className="w-3 h-3 rounded bg-emerald-600"></span> {t('solvedSuccess')}
+          </span>
+          <span className="flex items-center gap-1.5">
+            <span className="w-3 h-3 rounded bg-amber-500"></span> {t('needsReview')}
+          </span>
+          <span className="flex items-center gap-1.5">
+            <span className="text-slate-400 font-bold">—</span> {t('noQuestion')}
+          </span>
+        </div>
+      </div>
+
+      {/* Sheet Matrix Container */}
+      <div className="bg-white rounded-xl border border-slate-300 shadow-sm overflow-hidden">
+        <div className="overflow-x-auto">
+          <table className="w-full border-collapse text-sm">
+            <thead>
+              <tr className="bg-slate-100 border-b border-slate-300 text-slate-800 font-bold">
+                <th className="p-3 border-l border-slate-300 min-w-[320px] text-start">
+                  {t('syllabusTopic')}
+                </th>
+                {matrixData.exams.map((exam: any) => (
+                  <th key={exam.id} className="p-3 text-center min-w-[180px] border-l border-slate-300">
+                    {exam.title}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-slate-200">
+              {matrixData.topics.map((topic: any) => {
+                return (
+                  <tr key={topic.id} className="hover:bg-slate-50 transition-colors">
+                    {/* Syllabus Topic Title */}
+                    <td className="p-3 font-medium text-slate-900 border-l border-slate-200 text-start">
+                      <Link 
+                        href={`/simulation?topicId=${topic.id}`}
+                        className="hover:text-indigo-600 hover:underline transition-all block"
+                      >
+                        {topic.num}. {topic.name}
+                      </Link>
+                    </td>
+
+                    {/* Exam Columns */}
+                    {matrixData.exams.map((exam: any) => {
+                      const topicQuestions = matrixData.questions.filter(
+                        (q: any) => q.topic_id === topic.id && q.exam_id === exam.id
+                      );
+
+                      const hasQuestions = topicQuestions.length > 0;
+                      const isMastered = hasQuestions && topicQuestions.every((q: any) => q.status === 'correct');
+
+                      return (
+                        <td 
+                          key={exam.id} 
+                          className={`p-3 text-center font-bold border-l border-slate-200 transition-colors ${
+                            isMastered 
+                              ? 'bg-emerald-600 text-white' 
+                              : hasQuestions 
+                              ? 'bg-amber-100 text-amber-900' 
+                              : 'text-slate-400'
+                          }`}
                         >
-                          {uploadingSummaries ? "מפענח..." : "העלה ופענח סיכומים"}
-                        </button>
-                      </div>
-                    </div>
-                  </div>
-                )}
-              </div>
-            );
-          })
-        )}
+                          {hasQuestions 
+                            ? topicQuestions.map((q: any) => q.q_number).join(', ')
+                            : '—'
+                          }
+                        </td>
+                      );
+                    })}
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
       </div>
     </div>
+  );
+}
+</file>
+
+<file path="app/layout.tsx">
+import type { Metadata } from 'next';
+import Navbar from '@/app/components/Navbar';
+import { LanguageProvider } from '@/app/context/LanguageContext';
+import './globals.css';
+
+export const metadata: Metadata = {
+  title: 'Study Smarter | Smart Student Hub',
+  description: 'Dynamic spaced repetition and exam mastery platform',
+};
+
+export default function RootLayout({
+  children,
+}: {
+  children: React.ReactNode;
+}) {
+  return (
+    <html lang="he" dir="rtl" className="h-full">
+      <body className="h-full bg-slate-50 text-slate-900 font-sans antialiased selection:bg-indigo-500 selection:text-white">
+        <LanguageProvider>
+          <div className="min-h-screen flex flex-col">
+            <Navbar />
+            <main className="flex-1 pb-16">{children}</main>
+          </div>
+        </LanguageProvider>
+      </body>
+    </html>
   );
 }
 </file>

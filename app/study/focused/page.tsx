@@ -18,22 +18,26 @@ interface ProgressState {
 export default function FocusedPracticeWithTracking() {
   const [questions, setQuestions] = useState<Question[]>([]);
   const [progress, setProgress] = useState<Record<string, ProgressState>>({});
-  const [userAnswers, setUserAnswers] = useState<Record<string, string>>({});
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     async function loadQuestionsAndProgress() {
-      // 1. שליפת השאלה מתוך מסד הנתונים
-      const { data: qData } = await supabase.from("exam_questions").select("*");
+      const { data: { user } } = await supabase.auth.getUser();
+
+      const [{ data: qData }, { data: pData }] = await Promise.all([
+        supabase.from("exam_questions").select("*"),
+        user 
+          ? supabase.from("user_question_progress").select("*").eq("user_id", user.id)
+          : Promise.resolve({ data: [] }),
+      ]);
+
       if (qData) setQuestions(qData);
 
-      // 2. שליפת ההתקדמות והצבעים שמורים
-      const { data: pData } = await supabase.from("student_progress").select("*");
       if (pData) {
         const progressMap: Record<string, ProgressState> = {};
-        pData.forEach((p) => {
+        pData.forEach((p: any) => {
           progressMap[p.question_id] = {
-            attempts_count: p.attempts_count,
+            attempts_count: p.attempts_count || 0,
             is_first_try_correct: p.is_first_try_correct,
           };
         });
@@ -45,12 +49,13 @@ export default function FocusedPracticeWithTracking() {
     loadQuestionsAndProgress();
   }, []);
 
-  // עדכון סטטוס התשובה (נכון / לא נכון)
   const handleAnswerSubmit = async (questionId: string, isCorrect: boolean) => {
+    const { data: { user } } = await supabase.auth.getUser();
+    if (!user) return alert("אנא התחבר למערכת כדי לשמור התקדמות");
+
     const currentProgress = progress[questionId] || { attempts_count: 0, is_first_try_correct: null };
     const newAttemptsCount = currentProgress.attempts_count + 1;
 
-    // הקביעה האם זה נכון בפעם הראשונה מתרחשת אך ורק בניסיון הראשון (attempts_count == 0)
     const isFirstTryCorrect =
       currentProgress.attempts_count === 0
         ? isCorrect
@@ -61,28 +66,29 @@ export default function FocusedPracticeWithTracking() {
       is_first_try_correct: isFirstTryCorrect,
     };
 
-    // עדכון ב-State המקומי
     setProgress((prev) => ({ ...prev, [questionId]: updatedState }));
 
-    // שמירה במסד הנתונים ב-Supabase
-    await supabase.from("student_progress").upsert({
-      question_id: questionId,
-      attempts_count: newAttemptsCount,
-      is_first_try_correct: isFirstTryCorrect,
-      updated_at: new Date().toISOString(),
-    });
+    await supabase.from("user_question_progress").upsert(
+      {
+        user_id: user.id,
+        question_id: questionId,
+        attempts_count: newAttemptsCount,
+        is_first_try_correct: isFirstTryCorrect,
+        last_reviewed_at: new Date().toISOString(),
+      },
+      { onConflict: "user_id,question_id" }
+    );
   };
 
-  // פונקציית עיצוב צבע התיבה לפי התוצאה
   const getCardStyle = (questionId: string) => {
     const qProgress = progress[questionId];
     if (!qProgress || qProgress.is_first_try_correct === null) {
-      return "bg-white border-gray-200"; // ברירת מחדל - טרם נענתה
+      return "bg-white border-gray-200";
     }
     if (qProgress.is_first_try_correct === true) {
-      return "bg-green-50 border-2 border-green-500 text-green-900"; // 🟢 נכון מפעם ראשונה
+      return "bg-green-50 border-2 border-green-500 text-green-900";
     }
-    return "bg-red-50 border-2 border-red-500 text-red-900"; // 🔴 לא נכון מפעם ראשונה
+    return "bg-red-50 border-2 border-red-500 text-red-900";
   };
 
   if (loading) return <div className="p-8 text-center dir-rtl" dir="rtl">טוען שאלות ומעקב...</div>;
@@ -122,7 +128,6 @@ export default function FocusedPracticeWithTracking() {
 
               <p className="text-sm font-medium mb-4">{q.question_text}</p>
 
-              {/* אזור בדיקת תשובה */}
               <div className="flex items-center gap-3 pt-2 border-t border-gray-200/60">
                 <span className="text-xs font-semibold">סימון תוצאת תרגול:</span>
                 <button

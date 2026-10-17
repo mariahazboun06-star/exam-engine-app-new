@@ -1,7 +1,10 @@
 import { GoogleGenerativeAI, Part } from '@google/generative-ai';
 
-// Initialize Gemini - Ensure NEXT_PUBLIC_GEMINI_API_KEY is in your .env.local
-const apiKey = process.env.NEXT_PUBLIC_GEMINI_API_KEY || '';
+// Update lines 3-4 in lib/services/geminiService.ts
+const apiKey =
+  process.env.GEMINI_API_KEY ||
+  process.env.NEXT_PUBLIC_GEMINI_API_KEY ||
+  '';
 const genAI = new GoogleGenerativeAI(apiKey);
 
 export async function generateCourseKnowledgeMap(syllabusBuffer: Buffer, mimeType: string) {

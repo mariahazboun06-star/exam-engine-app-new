@@ -1,30 +1,58 @@
 'use client';
 
-import { useState } from 'react';
-import { useRouter } from 'next/navigation';
+import { useState, Suspense } from 'react';
+import { useRouter, useSearchParams } from 'next/navigation';
+import { supabase } from '@/lib/supabaseClient';
 
-export default function UploadExamPage() {
+function UploadExamContent() {
   const router = useRouter();
+  const searchParams = useSearchParams();
+  const courseId = searchParams.get('courseId') || '';
+
   const [formData, setFormData] = useState({
     year: new Date().getFullYear().toString(),
     semester: 'A',
     testPeriod: 'Moed A',
     file: null as File | null
   });
+  const [submitting, setSubmitting] = useState(false);
 
   async function handleUpload(e: React.FormEvent) {
     e.preventDefault();
     if (!formData.file) return alert("Please select an exam PDF first.");
+
+    setSubmitting(true);
+    const { data: { user } } = await supabase.auth.getUser();
+
+    if (!user) {
+      alert("Please log in to upload exams.");
+      setSubmitting(false);
+      return;
+    }
 
     const data = new FormData();
     data.append('year', formData.year);
     data.append('semester', formData.semester);
     data.append('testPeriod', formData.testPeriod);
     data.append('file', formData.file);
-    data.append('userId', 'user-123');
+    data.append('userId', user.id);
+    if (courseId) data.append('courseId', courseId);
 
-    await fetch('/api/ingest-exam', { method: 'POST', body: data });
-    router.push('/matrix');
+    try {
+      const res = await fetch('/api/ingest-exam', { method: 'POST', body: data });
+      const result = await res.json();
+
+      if (res.ok && result.success) {
+        router.push(courseId ? `/matrix?courseId=${courseId}` : '/dashboard');
+      } else {
+        alert(result.error || "Failed to upload and process exam.");
+      }
+    } catch (err) {
+      console.error("Upload error:", err);
+      alert("An unexpected error occurred during file upload.");
+    } finally {
+      setSubmitting(false);
+    }
   }
 
   return (
@@ -33,7 +61,7 @@ export default function UploadExamPage() {
         <div className="mb-6">
           <h1 className="text-2xl font-bold text-slate-900 tracking-tight">Upload Private Exam</h1>
           <p className="text-slate-500 text-sm mt-1">
-            Add past exams to extract topics and populate your private question matrix.
+            Add past exams to extract topics and populate your question matrix.
           </p>
         </div>
 
@@ -92,12 +120,21 @@ export default function UploadExamPage() {
 
           <button 
             type="submit" 
-            className="w-full py-3 px-4 bg-indigo-600 hover:bg-indigo-700 text-white font-semibold rounded-xl shadow-sm transition-all text-sm mt-2"
+            disabled={submitting}
+            className="w-full py-3 px-4 bg-indigo-600 hover:bg-indigo-700 disabled:bg-slate-400 text-white font-semibold rounded-xl shadow-sm transition-all text-sm mt-2"
           >
-            Process & Add to Matrix
+            {submitting ? "Processing Exam..." : "Process & Add to Matrix"}
           </button>
         </form>
       </div>
     </div>
+  );
+}
+
+export default function UploadExamPage() {
+  return (
+    <Suspense fallback={<div className="p-8 text-center text-slate-400">Loading upload form...</div>}>
+      <UploadExamContent />
+    </Suspense>
   );
 }
