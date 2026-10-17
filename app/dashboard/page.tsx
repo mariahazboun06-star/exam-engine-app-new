@@ -49,7 +49,7 @@ export default function UserDashboard() {
     const { data: { user } } = await supabase.auth.getUser();
 
     if (user) {
-      const { data, error } = await supabase
+      const { data } = await supabase
         .from("courses")
         .insert({
           name: newCourseName,
@@ -68,27 +68,69 @@ export default function UserDashboard() {
     setCreating(false);
   };
 
-  if (loading) return <div className="p-8 text-center dir-rtl" dir="rtl">טוען את הקורסים שלך...</div>;
+  if (loading) {
+    return (
+      <div className="min-h-[60vh] flex items-center justify-center dir-rtl" dir="rtl">
+        <div className="text-slate-400 font-medium animate-pulse">טוען את הקורסים שלי...</div>
+      </div>
+    );
+  }
 
   return (
-    <div className="max-w-5xl mx-auto p-6 dir-rtl space-y-8" dir="rtl">
-      <div className="flex justify-between items-center border-b pb-4">
-        <div>
-          <h1 className="text-2xl font-bold text-gray-900">📚 הקורסים שלי</h1>
-          <p className="text-xs text-gray-500 mt-1">בחר קורס כדי לצפות בחומרים, במטריצה ובסימולטורים.</p>
-        </div>
+    <div className="max-w-3xl mx-auto pt-10 px-4 dir-rtl space-y-8" dir="rtl">
+      {/* Main Page Title */}
+      <div className="border-b border-slate-200 pb-4">
+        <h1 className="text-3xl font-extrabold text-slate-900 tracking-tight">
+          📚 הקורסים שלי
+        </h1>
+        <p className="text-slate-500 text-sm mt-1">
+          בחר קורס כדי לצפות בחומרי הלימוד, במטריצה ובסימולציות.
+        </p>
       </div>
 
-      {/* יצירת קורס חדש */}
-      <div className="bg-white p-6 rounded-xl border shadow-sm">
-        <h2 className="text-sm font-bold text-gray-800 mb-3">➕ הוספת קורס חדש למערכת</h2>
-        <form onSubmit={handleCreateCourse} className="grid grid-cols-1 md:grid-cols-3 gap-3">
+      {/* Course List Stack (Matches your sketch: קורס X, קורס Y) */}
+      <div className="space-y-4">
+        {courses.length === 0 ? (
+          <div className="text-center p-10 bg-slate-50 rounded-2xl border border-dashed border-slate-300 text-slate-500 text-sm">
+            עדיין לא הקמת קורסים. צור את הקורס הראשון שלך למטה!
+          </div>
+        ) : (
+          courses.map((c) => (
+            <Link
+              key={c.id}
+              href={`/courses/${c.id}`}
+              className="bg-white p-6 rounded-2xl border border-slate-200 hover:border-indigo-500 hover:shadow-md transition-all flex items-center justify-between group block"
+            >
+              <div className="space-y-1">
+                {c.code && (
+                  <span className="text-[11px] font-extrabold text-indigo-600 bg-indigo-50 px-2.5 py-0.5 rounded-full">
+                    {c.code}
+                  </span>
+                )}
+                <h2 className="text-xl font-bold text-slate-900 group-hover:text-indigo-600 transition-colors">
+                  {c.name}
+                </h2>
+              </div>
+              
+              <div className="flex items-center gap-2 text-indigo-600 font-bold text-sm">
+                <span>כניסה לקורס</span>
+                <span className="text-lg">←</span>
+              </div>
+            </Link>
+          ))
+        )}
+      </div>
+
+      {/* Add New Course Section */}
+      <div className="bg-slate-50 p-6 rounded-2xl border border-slate-200 space-y-4">
+        <h3 className="text-sm font-bold text-slate-800">➕ הוספת קורס חדש</h3>
+        <form onSubmit={handleCreateCourse} className="flex flex-col sm:flex-row gap-3">
           <input
             type="text"
-            placeholder="שם הקורס (למשל: מבוא למיקרו כלכלה)"
+            placeholder="שם הקורס (למשל: אינפי 2)"
             value={newCourseName}
             onChange={(e) => setNewCourseName(e.target.value)}
-            className="p-2.5 border rounded-lg text-xs"
+            className="flex-1 p-3 bg-white border border-slate-200 rounded-xl text-xs focus:outline-none focus:ring-2 focus:ring-indigo-500/20"
             required
           />
           <input
@@ -96,41 +138,16 @@ export default function UserDashboard() {
             placeholder="קוד קורס (אופציונלי)"
             value={newCourseCode}
             onChange={(e) => setNewCourseCode(e.target.value)}
-            className="p-2.5 border rounded-lg text-xs"
+            className="w-full sm:w-40 p-3 bg-white border border-slate-200 rounded-xl text-xs focus:outline-none focus:ring-2 focus:ring-indigo-500/20"
           />
           <button
             type="submit"
             disabled={creating}
-            className="bg-blue-600 hover:bg-blue-700 text-white font-bold text-xs rounded-lg p-2.5 transition"
+            className="bg-indigo-600 hover:bg-indigo-700 disabled:bg-slate-400 text-white font-bold text-xs rounded-xl px-6 py-3 transition shadow-xs"
           >
             {creating ? "יוצר..." : "צור קורס"}
           </button>
         </form>
-      </div>
-
-      {/* רשימת הקורסים */}
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-        {courses.length === 0 ? (
-          <div className="col-span-full text-center p-8 bg-gray-50 rounded-xl border text-gray-500 text-xs">
-            עדיין לא הקמת קורסים. צור את הקורס הראשון שלך למעלה!
-          </div>
-        ) : (
-          courses.map((c) => (
-            <Link
-              key={c.id}
-              href={`/courses/${c.id}`}
-              className="bg-white p-5 rounded-xl border hover:border-blue-500 hover:shadow-md transition space-y-3 block"
-            >
-              <div className="flex justify-between items-start">
-                <span className="text-xs font-bold text-blue-600 bg-blue-50 px-2 py-0.5 rounded">
-                  {c.code || "קורס"}
-                </span>
-                <span className="text-xs text-gray-400">כניסה לקורס ←</span>
-              </div>
-              <h3 className="font-bold text-base text-gray-900">{c.name}</h3>
-            </Link>
-          ))
-        )}
       </div>
     </div>
   );

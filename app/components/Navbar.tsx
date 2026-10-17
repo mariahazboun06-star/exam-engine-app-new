@@ -8,6 +8,7 @@ export default function Navbar() {
   const pathname = usePathname();
   const { lang, toggleLanguage, t } = useLanguage();
 
+  // Hide sub-navigation when on dashboard or landing page
   const isDashboard = pathname === '/dashboard' || pathname === '/';
 
   const navItems = [

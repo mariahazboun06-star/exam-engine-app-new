@@ -26,7 +26,8 @@ export default function LandingPage() {
       } else {
         const { error } = await supabase.auth.signInWithPassword({ email, password });
         if (error) throw error;
-        router.push("/plan");
+        // Send user directly to My Courses (/dashboard) after logging in
+        router.push("/dashboard");
       }
     } catch (err: any) {
       setErrorMsg(err.message || "שגיאה בתהליך ההתחברות");
@@ -37,7 +38,6 @@ export default function LandingPage() {
 
   return (
     <div className="min-h-screen bg-gradient-to-b from-blue-50 to-white dir-rtl" dir="rtl">
-      {/* Top Header */}
       <header className="max-w-6xl mx-auto p-6 flex justify-between items-center">
         <div className="flex items-center gap-2 font-extrabold text-2xl text-blue-600">
           <span className="bg-blue-600 text-white px-3 py-1 rounded-xl text-base font-black">SS</span>
@@ -45,7 +45,6 @@ export default function LandingPage() {
         </div>
       </header>
 
-      {/* Hero & Information Section */}
       <main className="max-w-6xl mx-auto px-6 py-12 grid grid-cols-1 md:grid-cols-2 gap-12 items-center">
         <div className="space-y-6">
           <span className="bg-blue-100 text-blue-800 text-xs font-bold px-3 py-1 rounded-full">
@@ -57,32 +56,14 @@ export default function LandingPage() {
           </h1>
           <p className="text-gray-600 text-sm leading-relaxed">
             SS - Study Smarter הופכת את סיכומי כתב היד, הסילבוסים ומבחני העבר שלך למאגר תרגול ממוקד.
-            אפס המצאות AI, בדיקה אוטומטית של פתרונות בכתב יד, ומפת חום של נושאי חובה בסיכון גבוה.
           </p>
-
-          <div className="grid grid-cols-2 gap-4 pt-2">
-            <div className="bg-white p-4 rounded-xl border border-gray-100 shadow-sm">
-              <span className="text-xl">✍️</span>
-              <h3 className="font-bold text-xs mt-1">פענוח כתב יד</h3>
-              <p className="text-[11px] text-gray-500">העלאת מחברות בחינה וסריקות</p>
-            </div>
-            <div className="bg-white p-4 rounded-xl border border-gray-100 shadow-sm">
-              <span className="text-xl">🔥</span>
-              <h3 className="font-bold text-xs mt-1">מטריצת שכיחות</h3>
-              <p className="text-[11px] text-gray-500">זיהוי נושאי חובה בסיכון (80%+)</p>
-            </div>
-          </div>
         </div>
 
-        {/* Auth Form Card */}
         <div className="bg-white p-8 rounded-2xl border shadow-lg space-y-6 max-w-md mx-auto w-full">
           <div>
             <h2 className="text-xl font-bold text-gray-900">
               {isSignUp ? "יצירת חשבון חדש" : "התחברות למערכת"}
             </h2>
-            <p className="text-xs text-gray-500 mt-1">
-              {isSignUp ? "הרשם והתחל לנהל את הקורסים שלך" : "הכנס את הפרטים כדי לגשת לקורסים שלך"}
-            </p>
           </div>
 
           {errorMsg && (
@@ -99,7 +80,7 @@ export default function LandingPage() {
                 required
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
-                className="w-full p-2.5 border rounded-lg text-xs focus:ring-2 focus:ring-blue-500 focus:outline-none"
+                className="w-full p-2.5 border rounded-lg text-xs"
                 placeholder="student@university.ac.il"
               />
             </div>
@@ -111,7 +92,7 @@ export default function LandingPage() {
                 required
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
-                className="w-full p-2.5 border rounded-lg text-xs focus:ring-2 focus:ring-blue-500 focus:outline-none"
+                className="w-full p-2.5 border rounded-lg text-xs"
                 placeholder="••••••••"
               />
             </div>
@@ -119,7 +100,7 @@ export default function LandingPage() {
             <button
               type="submit"
               disabled={loading}
-              className="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-3 rounded-lg text-xs transition shadow-md"
+              className="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-3 rounded-lg text-xs transition"
             >
               {loading ? "מעבד..." : isSignUp ? "הרשם כעת" : "התחבר לחשבון"}
             </button>
