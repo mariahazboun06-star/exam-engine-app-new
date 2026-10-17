@@ -1,6 +1,6 @@
 'use client';
 
-import Link from 'link';
+import Link from 'next/link';
 import { usePathname, useSearchParams, useParams } from 'next/navigation';
 import { useLanguage } from '@/app/context/LanguageContext';
 import { Suspense } from 'react';
