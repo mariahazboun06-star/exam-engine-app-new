@@ -1,28 +1,37 @@
 'use client';
 
-import Link from 'next/link';
-import { usePathname } from 'next/navigation';
+import Link from 'link';
+import { usePathname, useSearchParams, useParams } from 'next/navigation';
 import { useLanguage } from '@/app/context/LanguageContext';
+import { Suspense } from 'react';
 
-export default function Navbar() {
+function NavbarContent() {
   const pathname = usePathname();
+  const searchParams = useSearchParams();
+  const params = useParams();
+
   const { lang, toggleLanguage, t } = useLanguage();
 
-  // Hide sub-navigation when on dashboard or landing page
+  // Extract active courseId from route params or search queries
+  const courseId = (params?.courseId as string) || searchParams.get('courseId');
+
+  // Check if we are on the main dashboard or landing page
   const isDashboard = pathname === '/dashboard' || pathname === '/';
 
-  const navItems = [
-    { name: t('navPlan'), href: '/plan' },
-    { name: t('navMatrix'), href: '/matrix' },
-    { name: t('navSimulation'), href: '/simulation' },
-    { name: t('navUpload'), href: '/upload-exam' },
-  ];
+  // Course-specific tabs are constructed ONLY when an active courseId exists
+  const courseNavItems = courseId
+    ? [
+        { name: t('navMatrix'), href: `/matrix?courseId=${courseId}` },
+        { name: t('navSimulation'), href: `/simulation?courseId=${courseId}` },
+        { name: t('navUpload'), href: `/upload-exam?courseId=${courseId}` },
+      ]
+    : [];
 
   return (
     <header className="sticky top-0 z-50 backdrop-blur-md bg-white/80 border-b border-slate-200/80">
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
         <div className="flex items-center justify-between h-16">
-          {/* Logo */}
+          {/* Brand Logo */}
           <Link href="/dashboard" className="flex items-center gap-2.5 font-bold text-xl text-slate-900 tracking-tight">
             <span className="flex items-center justify-center px-2 py-1 rounded-xl bg-indigo-600 text-white font-black text-xs shadow-sm shadow-indigo-200">
               SS
@@ -30,9 +39,10 @@ export default function Navbar() {
             <span>{t('brandName')}</span>
           </Link>
 
-          {/* Nav Items & Language Switcher */}
+          {/* Navigation Items & Language Switcher */}
           <div className="flex items-center gap-2">
-            {!isDashboard && (
+            {/* Show course-specific tabs ONLY when inside a specific course context */}
+            {courseId ? (
               <nav className="flex items-center gap-1 sm:gap-2">
                 <Link
                   href="/dashboard"
@@ -41,8 +51,8 @@ export default function Navbar() {
                   {t('navMyCourses')}
                 </Link>
 
-                {navItems.map((item) => {
-                  const isActive = pathname.startsWith(item.href);
+                {courseNavItems.map((item) => {
+                  const isActive = pathname === item.href.split('?')[0];
                   return (
                     <Link
                       key={item.href}
@@ -58,9 +68,19 @@ export default function Navbar() {
                   );
                 })}
               </nav>
+            ) : (
+              /* Global View (No Course Selected): Show 'My Courses' link if not already on dashboard */
+              !isDashboard && (
+                <Link
+                  href="/dashboard"
+                  className="px-3 py-1.5 rounded-xl text-sm font-medium text-slate-600 hover:text-slate-900 hover:bg-slate-100 transition-all"
+                >
+                  {t('navMyCourses')}
+                </Link>
+              )
             )}
 
-            {/* Language Switch Button */}
+            {/* Language Switcher */}
             <button
               onClick={toggleLanguage}
               className="px-3 py-1.5 rounded-xl border border-slate-200 bg-white text-xs font-bold text-slate-700 hover:bg-slate-50 transition-all flex items-center gap-1.5 shadow-2xs"
@@ -72,5 +92,13 @@ export default function Navbar() {
         </div>
       </div>
     </header>
+  );
+}
+
+export default function Navbar() {
+  return (
+    <Suspense fallback={<header className="h-16 border-b border-slate-200 bg-white" />}>
+      <NavbarContent />
+    </Suspense>
   );
 }
